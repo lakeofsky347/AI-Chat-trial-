@@ -1,0 +1,124 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>AI Chat Trial Web</title>
+  <link rel="stylesheet" href="/static/styles.css">
+</head>
+<body>
+  <div class="app-shell">
+    <aside class="sidebar">
+      <div class="brand">
+        <div class="brand-mark">A</div>
+        <div>
+          <h1>AI Chat Trial</h1>
+          <p>Local Tavern-style Web App</p>
+        </div>
+      </div>
+
+      <button id="newCharacterBtn" class="primary full">创建新角色</button>
+
+      <div class="sidebar-section">
+        <div class="section-title">角色列表</div>
+        <div id="characterList" class="character-list"></div>
+      </div>
+    </aside>
+
+    <main class="workspace">
+      <header class="topbar">
+        <div>
+          <div class="eyeline">本地运行 / 手动模型配置</div>
+          <h2 id="workspaceTitle">角色创作台</h2>
+        </div>
+        <div class="topbar-actions">
+          <button id="settingsBtn" class="ghost">模型配置</button>
+          <button id="exportBtn" class="ghost" disabled>导出角色</button>
+          <button id="themeBtn" class="ghost">深色</button>
+        </div>
+      </header>
+
+      <section id="createPanel" class="panel create-panel">
+        <div class="panel-copy">
+          <h3>用一句话开始创建角色</h3>
+          <p>描述你想要的角色、世界观、语气或开场场景。系统会生成可编辑草案，再保存到左侧角色栏。</p>
+        </div>
+        <div class="prompt-box">
+          <textarea id="creationPrompt" placeholder="例如：帮我创建一个冷静、专业、会引导新手的女侦探角色，背景是近未来都市。"></textarea>
+          <div class="prompt-actions">
+            <label><input id="includeIllustration" type="checkbox" checked> 生成插图提示词</label>
+            <button id="generateBtn" class="primary">生成草案</button>
+          </div>
+        </div>
+      </section>
+
+      <section id="draftPanel" class="panel draft-panel hidden">
+        <div class="panel-head">
+          <div>
+            <div class="section-title">草案结果</div>
+            <h3>确认后保存为角色</h3>
+          </div>
+          <button id="saveDraftBtn" class="primary">保存到左侧角色栏</button>
+        </div>
+        <div class="draft-grid">
+          <label>角色名称<input id="draftName" type="text"></label>
+          <label>开场白<textarea id="draftFirstMessage"></textarea></label>
+          <label class="wide">角色简介<textarea id="draftDescription"></textarea></label>
+          <label class="wide">系统设定<textarea id="draftSystemPrompt"></textarea></label>
+          <label class="wide">世界书 / 补充设定<textarea id="draftLorebook"></textarea></label>
+          <label class="wide">插图提示词<textarea id="draftImagePrompt"></textarea></label>
+        </div>
+      </section>
+
+      <section id="chatPanel" class="panel chat-panel hidden">
+        <div class="chat-head">
+          <div>
+            <div class="section-title">沉浸式对话</div>
+            <h3 id="chatCharacterName">未选择角色</h3>
+          </div>
+          <button id="backToCreateBtn" class="ghost">返回创作台</button>
+        </div>
+        <div id="messageList" class="message-list"></div>
+        <div class="chat-input-row">
+          <textarea id="chatInput" placeholder="输入你的回复，按 Ctrl + Enter 发送"></textarea>
+          <button id="sendBtn" class="primary">发送</button>
+        </div>
+      </section>
+    </main>
+
+    <aside id="settingsPanel" class="settings-drawer">
+      <div class="drawer-head">
+        <div>
+          <div class="section-title">模型配置</div>
+          <h3>本地 API 设置</h3>
+        </div>
+        <button id="closeSettingsBtn" class="icon-btn">×</button>
+      </div>
+
+      <div class="settings-block">
+        <h4>快速 BYOK</h4>
+        <label>Base URL<input id="byokBaseUrl" type="text" placeholder="https://api.example.com/v1"></label>
+        <label>Model<input id="byokModel" type="text" placeholder="model-name"></label>
+        <label>API Key<input id="byokApiKey" type="password" placeholder="只保存在本地数据库"></label>
+        <button id="saveSettingsBtn" class="primary full">保存 BYOK</button>
+      </div>
+
+      <div class="settings-block">
+        <h4>任务模型端点</h4>
+        <div class="endpoint-grid">
+          <label>Provider<input id="endpointProvider" type="text" placeholder="deepseek / qwen / kimi"></label>
+          <label>Name<input id="endpointName" type="text" placeholder="core-llm"></label>
+          <label>Base URL<input id="endpointBaseUrl" type="text"></label>
+          <label>Model<input id="endpointModel" type="text"></label>
+          <label>API Key<input id="endpointApiKey" type="password"></label>
+        </div>
+        <button id="addEndpointBtn" class="secondary full">新增端点</button>
+        <div id="endpointList" class="endpoint-list"></div>
+      </div>
+    </aside>
+  </div>
+
+  <div id="toast" class="toast hidden"></div>
+  <script src="/static/app.js"></script>
+</body>
+</html>
