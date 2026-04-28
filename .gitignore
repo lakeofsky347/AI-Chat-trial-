@@ -1,0 +1,12 @@
+__pycache__/
+.pytest_cache/
+.venv/
+*.pyc
+data/
+scripts/start_local_private.ps1
+*.private.ps1
+.env.local
+dist/
+build/
+*.spec
+_release_mvp/
