@@ -1,4 +1,4 @@
-﻿.env.local.example
+.env.local.example
 .gitignore
 app\__init__.py
 app\agent_runtime.py
@@ -19,4 +19,7 @@ requirements.txt
 run_all_in_one.py
 scripts\prepare_mvp_release.ps1
 scripts\start_local.ps1
+static\app.js
+static\index.html
+static\styles.css
 SUBMIT_MANIFEST.txt
