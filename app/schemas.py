@@ -265,6 +265,10 @@ class ModelEndpointHealthResponse(BaseModel):
 
 class GenerationJobCreateRequest(BaseModel):
     user_input: str = Field(..., min_length=1, max_length=8000)
+    pipeline_type: str = Field(default="roleplay_character", min_length=1, max_length=64)
+    apply_mode: str = Field(default="draft_only", min_length=1, max_length=32)
+    story_project_id: str | None = Field(default=None, min_length=1, max_length=64)
+    story_draft_payload: dict[str, object] | None = None
     include_illustration_prompt: bool = True
     include_audio_plan: bool = False
     run_async: bool = False
@@ -272,6 +276,10 @@ class GenerationJobCreateRequest(BaseModel):
 
 class GenerationJobRerunRequest(BaseModel):
     user_input: str | None = Field(default=None, min_length=1, max_length=8000)
+    pipeline_type: str | None = Field(default=None, min_length=1, max_length=64)
+    apply_mode: str | None = Field(default=None, min_length=1, max_length=32)
+    story_project_id: str | None = Field(default=None, min_length=1, max_length=64)
+    story_draft_payload: dict[str, object] | None = None
     include_illustration_prompt: bool | None = None
     include_audio_plan: bool | None = None
     run_async: bool = False
@@ -369,3 +377,142 @@ class LorebookResponse(BaseModel):
     enabled: bool
     created_at: datetime
     updated_at: datetime
+
+
+class StoryProjectCreateRequest(BaseModel):
+    title: str = Field(..., min_length=1, max_length=120)
+    premise: str = Field(..., min_length=1, max_length=8000)
+    opening_scene: str = Field(default="", max_length=8000)
+    system_prompt: str = Field(default="", max_length=8000)
+
+
+class StoryProjectUpdateRequest(BaseModel):
+    title: str | None = Field(default=None, min_length=1, max_length=120)
+    premise: str | None = Field(default=None, min_length=1, max_length=8000)
+    opening_scene: str | None = Field(default=None, max_length=8000)
+    system_prompt: str | None = Field(default=None, max_length=8000)
+    status: str | None = Field(default=None, min_length=1, max_length=32)
+
+
+class StoryProjectResponse(BaseModel):
+    project_id: str
+    title: str
+    premise: str
+    opening_scene: str
+    system_prompt: str
+    status: str
+    created_at: datetime
+    updated_at: datetime
+
+
+class StorySessionResponse(BaseModel):
+    session_id: str
+    project_id: str
+    current_summary: str
+    current_scene: str
+    active_checkpoint_id: str | None
+    created_at: datetime
+    updated_at: datetime
+
+
+class StoryEntryResponse(BaseModel):
+    entry_id: str
+    session_id: str
+    role: str
+    content: str
+    entry_type: str
+    sequence: int
+    created_at: datetime
+
+
+class StoryHistoryResponse(BaseModel):
+    session_id: str
+    history: list[StoryEntryResponse]
+
+
+class StoryFactResponse(BaseModel):
+    fact_id: str
+    session_id: str
+    fact_text: str
+    sort_order: int
+    created_at: datetime
+    updated_at: datetime
+
+
+class StoryCheckpointResponse(BaseModel):
+    checkpoint_id: str
+    session_id: str
+    title: str
+    summary_text: str
+    current_scene: str
+    facts: list[str] = Field(default_factory=list)
+    last_sequence: int
+    created_at: datetime
+
+
+class StoryLorebookCreateRequest(BaseModel):
+    keyword: str = Field(..., min_length=1, max_length=200)
+    insert_text: str = Field(..., min_length=1, max_length=12000)
+    sort_order: int = Field(default=100, ge=0, le=10000)
+    enabled: bool = True
+
+
+class StoryLorebookUpdateRequest(BaseModel):
+    keyword: str | None = Field(default=None, min_length=1, max_length=200)
+    insert_text: str | None = Field(default=None, min_length=1, max_length=12000)
+    sort_order: int | None = Field(default=None, ge=0, le=10000)
+    enabled: bool | None = None
+
+
+class StoryLorebookResponse(BaseModel):
+    lorebook_id: str
+    project_id: str
+    keyword: str
+    insert_text: str
+    sort_order: int
+    enabled: bool
+    created_at: datetime
+    updated_at: datetime
+
+
+class StoryContinueRequest(BaseModel):
+    session_id: str = Field(..., min_length=1, max_length=64)
+    message: str = Field(..., min_length=1, max_length=4000)
+
+
+class StoryContextStatsResponse(BaseModel):
+    session_id: str
+    context_char_budget: int
+    summary_chars: int
+    fact_count: int
+    lorebook_hit_count: int
+    recent_entry_chars: int
+    recent_entry_count: int
+    checkpoint_count: int
+    updated_at: datetime
+
+
+class StoryContinueResponse(BaseModel):
+    session_id: str
+    reply: str
+    checkpoint_id: str
+    entry_count: int
+    context_stats: StoryContextStatsResponse
+
+
+class StoryAigcActionRequest(BaseModel):
+    session_id: str = Field(..., min_length=1, max_length=64)
+    action_type: str = Field(..., min_length=1, max_length=40)
+    selected_text: str = Field(..., min_length=1, max_length=8000)
+    style: str | None = Field(default=None, max_length=120)
+    shot: str | None = Field(default=None, max_length=120)
+    voice: str | None = Field(default=None, max_length=120)
+
+
+class StoryAigcActionResponse(BaseModel):
+    action_id: str
+    session_id: str
+    action_type: str
+    selected_text: str
+    result: dict[str, object]
+    created_at: datetime

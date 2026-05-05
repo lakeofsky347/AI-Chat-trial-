@@ -1,9 +1,10 @@
-<!doctype html>
+﻿<!doctype html>
 <html lang="zh-CN">
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>AI Chat Trial Web</title>
+  <title>本地 AI 创作台</title>
+  <link rel="stylesheet" href="styles.css">
   <link rel="stylesheet" href="/static/styles.css">
 </head>
 <body>
@@ -12,23 +13,34 @@
       <div class="brand">
         <div class="brand-mark">A</div>
         <div>
-          <h1>AI Chat Trial</h1>
-          <p>Local Tavern-style Web App</p>
+          <h1>AI 创作台</h1>
+          <p>角色扮演 + 互动小说</p>
         </div>
       </div>
 
-      <button id="newCharacterBtn" class="primary full">创建新角色</button>
+      <div class="mode-switch">
+        <button id="modeRoleplayBtn" class="primary full">角色扮演</button>
+        <button id="modeStoryBtn" class="ghost full">互动小说</button>
+      </div>
+
+      <button id="newCharacterBtn" class="primary full">创建角色</button>
+      <button id="newStoryBtn" class="secondary full">创建故事</button>
 
       <div class="sidebar-section">
         <div class="section-title">角色列表</div>
         <div id="characterList" class="character-list"></div>
+      </div>
+
+      <div class="sidebar-section">
+        <div class="section-title">故事列表</div>
+        <div id="storyList" class="character-list"></div>
       </div>
     </aside>
 
     <main class="workspace">
       <header class="topbar">
         <div>
-          <div class="eyeline">本地运行 / 手动模型配置</div>
+          <div id="workspaceEyeline" class="eyeline">本地运行 / 手动配置模型</div>
           <h2 id="workspaceTitle">角色创作台</h2>
         </div>
         <div class="topbar-actions">
@@ -41,10 +53,10 @@
       <section id="createPanel" class="panel create-panel">
         <div class="panel-copy">
           <h3>用一句话开始创建角色</h3>
-          <p>描述你想要的角色、世界观、语气或开场场景。系统会生成可编辑草案，再保存到左侧角色栏。</p>
+          <p>描述角色、世界观、语气或开场场景。系统会生成可编辑草案，确认后保存到左侧角色列表。</p>
         </div>
         <div class="prompt-box">
-          <textarea id="creationPrompt" placeholder="例如：帮我创建一个冷静、专业、会引导新手的女侦探角色，背景是近未来都市。"></textarea>
+          <textarea id="creationPrompt" placeholder="例如：创建一个冷静、严谨的近未来城市侦探角色，带领新手搭档调查连续失踪事件。"></textarea>
           <div class="prompt-actions">
             <label><input id="includeIllustration" type="checkbox" checked> 生成插图提示词</label>
             <button id="generateBtn" class="primary">生成草案</button>
@@ -52,19 +64,104 @@
         </div>
       </section>
 
+      <section id="storyCreatePanel" class="panel draft-panel hidden">
+        <div class="panel-copy">
+          <h3>用一句话生成故事草案</h3>
+          <p>描述世界观、主角、语气和核心冲突。系统会生成故事蓝图、项目世界书和连续性检查，确认后再写入项目。</p>
+        </div>
+        <div class="prompt-box">
+          <textarea id="storyDraftPrompt" placeholder="例如：年轻领航员继承一张禁忌星图，被卷入浮空城阴谋，每一次路线选择都会改变世界命运。"></textarea>
+          <div class="prompt-actions">
+            <label><input id="storyDraftIncludeIllustration" type="checkbox" checked> 生成插图提示词</label>
+            <label><input id="storyDraftIncludeAudio" type="checkbox"> 生成音频方案</label>
+            <button id="storyGenerateBtn" class="primary">生成故事草案</button>
+          </div>
+        </div>
+
+        <div id="storyDraftPanel" class="story-draft-panel hidden">
+          <div class="panel-head">
+            <div>
+              <div class="section-title">故事草案结果</div>
+              <h3>应用前请先审阅</h3>
+            </div>
+            <div class="endpoint-actions">
+              <button id="applyStoryNewBtn" class="primary">应用为新故事</button>
+              <button id="applyStoryCurrentBtn" class="secondary">覆盖当前故事</button>
+            </div>
+          </div>
+          <div class="draft-grid">
+            <label>标题<input id="storyDraftTitle" type="text"></label>
+            <label>语气<input id="storyDraftTone" type="text"></label>
+            <label class="wide">故事前提<textarea id="storyDraftPremise"></textarea></label>
+            <label class="wide">开场场景<textarea id="storyDraftOpeningScene"></textarea></label>
+            <label class="wide">系统提示词<textarea id="storyDraftSystemPrompt"></textarea></label>
+            <label class="wide">主角设定<textarea id="storyDraftProtagonistProfile"></textarea></label>
+            <div class="wide story-draft-chapter-editor">
+              <div class="story-draft-chapter-head">
+                <label>章节大纲</label>
+                <button id="addStoryDraftChapterBtn" class="secondary" type="button">新增章节</button>
+              </div>
+              <div id="storyDraftChapterEntries" class="story-draft-chapter-entries"></div>
+            </div>
+            <div class="wide story-draft-lorebook-editor">
+              <div class="story-draft-lorebook-head">
+                <label>故事世界书条目</label>
+                <button id="addStoryDraftLorebookEntryBtn" class="secondary" type="button">新增条目</button>
+              </div>
+              <div id="storyDraftLorebookEntries" class="story-draft-lorebook-entries"></div>
+            </div>
+            <label class="wide">插图提示词<textarea id="storyDraftIllustrationPrompt"></textarea></label>
+            <label class="wide">音频方案<textarea id="storyDraftAudioPlan"></textarea></label>
+            <div id="storyDraftContinuitySummary" class="wide continuity-card"></div>
+            <label>连续性状态<input id="storyDraftReviewStatus" type="text" readonly></label>
+            <label class="wide">阻塞问题<textarea id="storyDraftContinuityMissing" readonly></textarea></label>
+            <label class="wide">提醒事项<textarea id="storyDraftContinuityRisks" readonly></textarea></label>
+          </div>
+        </div>
+
+        <div class="panel-head">
+          <div>
+              <div class="section-title">互动小说</div>
+              <h3>手动创建或更新故事项目</h3>
+          </div>
+          <button id="createStoryBtn" class="primary">创建故事</button>
+        </div>
+        <div class="draft-grid">
+          <label>故事标题<input id="storyTitle" type="text" placeholder="最后的领航员"></label>
+          <label>开场场景<textarea id="storyOpeningScene" placeholder="雨水敲打观测站玻璃，浮空城下方的警报声一阵阵传来。"></textarea></label>
+          <label class="wide">故事前提<textarea id="storyPremise" placeholder="描述世界、主角、核心张力，以及玩家将进入怎样的故事。"></textarea></label>
+          <label class="wide">叙事系统提示词<textarea id="storySystemPrompt" placeholder="可选：补充节奏、语气、文风等叙事要求。"></textarea></label>
+        </div>
+        <div class="story-lorebook-panel">
+          <div class="panel-head compact">
+            <div>
+              <div class="section-title">项目世界书</div>
+              <h3>故事专属记忆条目</h3>
+            </div>
+            <button id="saveStoryLorebookBtn" class="secondary">新增世界书条目</button>
+          </div>
+          <div class="draft-grid">
+            <label>关键词<input id="storyLorebookKeyword" type="text" placeholder="例如：观测站、公会、领航员"></label>
+            <label>排序值<input id="storyLorebookSortOrder" type="number" value="100" min="0" max="10000"></label>
+            <label class="wide">插入文本<textarea id="storyLorebookInsertText" placeholder="当关键词出现时，需要进入故事上下文的参考设定。"></textarea></label>
+          </div>
+          <div id="storyLorebookList" class="story-lorebook-list"></div>
+        </div>
+      </section>
+
       <section id="draftPanel" class="panel draft-panel hidden">
         <div class="panel-head">
           <div>
-            <div class="section-title">草案结果</div>
-            <h3>确认后保存为角色</h3>
+            <div class="section-title">角色草案结果</div>
+            <h3>审阅后保存为角色</h3>
           </div>
-          <button id="saveDraftBtn" class="primary">保存到左侧角色栏</button>
+          <button id="saveDraftBtn" class="primary">保存到角色列表</button>
         </div>
         <div class="draft-grid">
           <label>角色名称<input id="draftName" type="text"></label>
           <label>开场白<textarea id="draftFirstMessage"></textarea></label>
           <label class="wide">角色简介<textarea id="draftDescription"></textarea></label>
-          <label class="wide">系统设定<textarea id="draftSystemPrompt"></textarea></label>
+          <label class="wide">系统提示词<textarea id="draftSystemPrompt"></textarea></label>
           <label class="wide">世界书 / 补充设定<textarea id="draftLorebook"></textarea></label>
           <label class="wide">插图提示词<textarea id="draftImagePrompt"></textarea></label>
         </div>
@@ -76,12 +173,53 @@
             <div class="section-title">沉浸式对话</div>
             <h3 id="chatCharacterName">未选择角色</h3>
           </div>
-          <button id="backToCreateBtn" class="ghost">返回创作台</button>
+          <div class="endpoint-actions">
+            <button id="editCharacterBtn" class="secondary">编辑角色</button>
+            <button id="deleteCharacterBtn" class="ghost">删除角色</button>
+            <button id="backToCreateBtn" class="ghost">返回创作台</button>
+          </div>
         </div>
         <div id="messageList" class="message-list"></div>
         <div class="chat-input-row">
           <textarea id="chatInput" placeholder="输入你的回复，按 Ctrl + Enter 发送"></textarea>
           <button id="sendBtn" class="primary">发送</button>
+        </div>
+      </section>
+
+      <section id="storyPanel" class="panel chat-panel hidden">
+        <div class="chat-head">
+          <div>
+            <div class="section-title">互动小说</div>
+            <h3 id="storyProjectName">未选择故事</h3>
+          </div>
+          <div class="endpoint-actions">
+            <button id="editStoryBtn" class="secondary">编辑故事</button>
+            <button id="deleteStoryBtn" class="ghost">删除故事</button>
+            <button id="backToStoryCreateBtn" class="ghost">返回故事创作台</button>
+          </div>
+        </div>
+        <div class="story-meta">
+          <div class="story-meta-card">
+            <strong>摘要</strong>
+            <div id="storySummary" class="story-meta-text">暂无摘要。</div>
+          </div>
+          <div class="story-meta-card">
+            <strong>事实记忆</strong>
+            <div id="storyFacts" class="story-facts"></div>
+          </div>
+          <div class="story-meta-card">
+            <strong>检查点</strong>
+            <div id="storyCheckpoints" class="story-checkpoints"></div>
+          </div>
+        </div>
+        <div id="storyMessageList" class="message-list"></div>
+        <div class="story-action-panel">
+          <strong>故事动作记录</strong>
+          <div id="storyActionHistory" class="story-action-history"></div>
+        </div>
+        <div class="chat-input-row">
+          <textarea id="storyInput" placeholder="描述主角下一步行动，或直接写下下一段推进。按 Ctrl + Enter 继续。"></textarea>
+          <button id="storySendBtn" class="primary">继续故事</button>
         </div>
       </section>
     </main>
@@ -90,7 +228,7 @@
       <div class="drawer-head">
         <div>
           <div class="section-title">模型配置</div>
-          <h3>本地 API 设置</h3>
+          <h3>本地 API 配置</h3>
         </div>
         <button id="closeSettingsBtn" class="icon-btn">×</button>
       </div>
@@ -99,26 +237,62 @@
         <h4>快速 BYOK</h4>
         <label>Base URL<input id="byokBaseUrl" type="text" placeholder="https://api.example.com/v1"></label>
         <label>Model<input id="byokModel" type="text" placeholder="model-name"></label>
-        <label>API Key<input id="byokApiKey" type="password" placeholder="只保存在本地数据库"></label>
+        <label>API Key<input id="byokApiKey" type="password" placeholder="仅保存在本地数据库"></label>
         <button id="saveSettingsBtn" class="primary full">保存 BYOK</button>
       </div>
 
       <div class="settings-block">
         <h4>任务模型端点</h4>
+        <p class="field-hint">先创建模型端点，再把不同生成任务绑定到指定端点。</p>
         <div class="endpoint-grid">
-          <label>Provider<input id="endpointProvider" type="text" placeholder="deepseek / qwen / kimi"></label>
-          <label>Name<input id="endpointName" type="text" placeholder="core-llm"></label>
-          <label>Base URL<input id="endpointBaseUrl" type="text"></label>
-          <label>Model<input id="endpointModel" type="text"></label>
-          <label>API Key<input id="endpointApiKey" type="password"></label>
+          <label>Provider
+            <select id="endpointProvider">
+              <option value="deepseek">DeepSeek</option>
+              <option value="qwen">Qwen</option>
+              <option value="kimi">Kimi</option>
+              <option value="openai">OpenAI</option>
+              <option value="openai_compatible">OpenAI Compatible</option>
+            </select>
+          </label>
+          <label>名称<input id="endpointName" type="text" placeholder="deepseek-chat-main"></label>
+          <label>Base URL<input id="endpointBaseUrl" type="text" placeholder="https://api.deepseek.com/v1"></label>
+          <label>Model<input id="endpointModel" type="text" placeholder="deepseek-chat"></label>
+          <label>API Key<input id="endpointApiKey" type="password" placeholder="仅保存在本地数据库"></label>
         </div>
-        <button id="addEndpointBtn" class="secondary full">新增端点</button>
+        <div class="endpoint-form-actions">
+          <button id="addEndpointBtn" class="secondary full">新增端点</button>
+          <button id="cancelEndpointEditBtn" class="ghost full hidden">取消编辑</button>
+        </div>
         <div id="endpointList" class="endpoint-list"></div>
+      </div>
+
+      <div class="settings-block">
+        <h4>任务绑定</h4>
+        <p class="field-hint">未绑定的任务会按默认端点优先级自动选择。</p>
+        <div class="binding-grid">
+          <label>需求理解<select id="bindIntentParse"></select></label>
+          <label>任务分发<select id="bindPlanDispatch"></select></label>
+          <label>角色卡生成<select id="bindCharacterCard"></select></label>
+          <label>角色世界书生成<select id="bindLorebook"></select></label>
+          <label>故事蓝图生成<select id="bindStoryBlueprint"></select></label>
+          <label>故事世界书生成<select id="bindStoryLorebook"></select></label>
+          <label>插图提示词生成<select id="bindIllustration"></select></label>
+          <label>音频方案生成<select id="bindAudio"></select></label>
+          <label>故事连续性检查<select id="bindStoryContinuity"></select></label>
+          <label>结果审查<select id="bindReview"></select></label>
+          <label>故事续写<select id="bindStoryContinue"></select></label>
+        </div>
+        <button id="saveBindingsBtn" class="primary full">保存任务绑定</button>
       </div>
     </aside>
   </div>
 
   <div id="toast" class="toast hidden"></div>
-  <script src="/static/app.js"></script>
+  <script>
+    const script = document.createElement("script");
+    script.src = window.location.protocol === "file:" ? "app.js" : "/static/app.js";
+    script.async = false;
+    document.body.appendChild(script);
+  </script>
 </body>
 </html>

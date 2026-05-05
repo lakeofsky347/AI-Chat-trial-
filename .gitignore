@@ -1,6 +1,10 @@
 __pycache__/
 .pytest_cache/
 .venv/
+.uv-cache/
+.uv-python/
+.mypy_cache/
+.ruff_cache/
 *.pyc
 data/
 scripts/start_local_private.ps1
@@ -8,5 +12,9 @@ scripts/start_local_private.ps1
 .env.local
 dist/
 build/
+dist_web/
+build_web/
+build_specs/
+edge-debug-profile/
 *.spec
 _release_mvp/

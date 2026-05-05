@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime, timezone
+import json
 from pathlib import Path
 import sqlite3
 from typing import Protocol
@@ -156,6 +157,84 @@ class StoredGenerationEvent:
     created_at: datetime
 
 
+@dataclass(frozen=True)
+class StoredStoryProject:
+    project_id: str
+    title: str
+    premise: str
+    opening_scene: str
+    system_prompt: str
+    status: str
+    created_at: datetime
+    updated_at: datetime
+
+
+@dataclass(frozen=True)
+class StoredStorySession:
+    session_id: str
+    project_id: str
+    current_summary: str
+    current_scene: str
+    active_checkpoint_id: str | None
+    created_at: datetime
+    updated_at: datetime
+
+
+@dataclass(frozen=True)
+class StoredStoryEntry:
+    entry_id: str
+    session_id: str
+    role: str
+    content: str
+    entry_type: str
+    sequence: int
+    created_at: datetime
+
+
+@dataclass(frozen=True)
+class StoredStoryFact:
+    fact_id: str
+    session_id: str
+    fact_text: str
+    sort_order: int
+    created_at: datetime
+    updated_at: datetime
+
+
+@dataclass(frozen=True)
+class StoredStoryCheckpoint:
+    checkpoint_id: str
+    session_id: str
+    title: str
+    summary_text: str
+    current_scene: str
+    facts_json: str
+    last_sequence: int
+    created_at: datetime
+
+
+@dataclass(frozen=True)
+class StoredStoryLorebook:
+    lorebook_id: str
+    project_id: str
+    keyword: str
+    insert_text: str
+    sort_order: int
+    enabled: bool
+    created_at: datetime
+    updated_at: datetime
+
+
+@dataclass(frozen=True)
+class StoredStoryAction:
+    action_id: str
+    session_id: str
+    action_type: str
+    selected_text: str
+    result_payload_json: str
+    created_at: datetime
+
+
 class CharacterNotFoundError(ValueError):
     pass
 
@@ -185,6 +264,22 @@ class GenerationJobNotFoundError(ValueError):
 
 
 class GenerationTaskNotFoundError(ValueError):
+    pass
+
+
+class StoryProjectNotFoundError(ValueError):
+    pass
+
+
+class StorySessionNotFoundError(ValueError):
+    pass
+
+
+class StoryCheckpointNotFoundError(ValueError):
+    pass
+
+
+class StoryLorebookNotFoundError(ValueError):
     pass
 
 
@@ -504,6 +599,183 @@ class GenerationRepository(Protocol):
         ...
 
     def list_events(self, *, job_id: str) -> list[StoredGenerationEvent]:
+        ...
+
+
+class StoryRepository(Protocol):
+    def create_project(
+        self,
+        *,
+        title: str,
+        premise: str,
+        opening_scene: str,
+        system_prompt: str,
+        status: str,
+    ) -> StoredStoryProject:
+        ...
+
+    def list_projects(self, *, limit: int = 50, offset: int = 0) -> list[StoredStoryProject]:
+        ...
+
+    def get_project(self, project_id: str) -> StoredStoryProject:
+        ...
+
+    def update_project(
+        self,
+        project_id: str,
+        *,
+        title: str | None = None,
+        premise: str | None = None,
+        opening_scene: str | None = None,
+        system_prompt: str | None = None,
+        status: str | None = None,
+    ) -> StoredStoryProject:
+        ...
+
+    def delete_project(self, project_id: str) -> None:
+        ...
+
+    def create_session(self, *, project_id: str) -> StoredStorySession:
+        ...
+
+    def get_session(self, session_id: str) -> StoredStorySession:
+        ...
+
+    def list_sessions(
+        self,
+        *,
+        project_id: str | None = None,
+        limit: int = 50,
+        offset: int = 0,
+    ) -> list[StoredStorySession]:
+        ...
+
+    def update_session_state(
+        self,
+        session_id: str,
+        *,
+        current_summary: str | None = None,
+        current_scene: str | None = None,
+        active_checkpoint_id: str | None | object = UNSET,
+    ) -> StoredStorySession:
+        ...
+
+    def append_entry(
+        self,
+        *,
+        session_id: str,
+        role: str,
+        content: str,
+        entry_type: str,
+    ) -> StoredStoryEntry:
+        ...
+
+    def get_history(self, session_id: str) -> list[StoredStoryEntry]:
+        ...
+
+    def count_entries(self, session_id: str) -> int:
+        ...
+
+    def replace_facts(self, *, session_id: str, facts: list[str]) -> list[StoredStoryFact]:
+        ...
+
+    def list_facts(self, session_id: str) -> list[StoredStoryFact]:
+        ...
+
+    def create_checkpoint(
+        self,
+        *,
+        session_id: str,
+        title: str,
+        summary_text: str,
+        current_scene: str,
+        facts_json: str,
+        last_sequence: int,
+    ) -> StoredStoryCheckpoint:
+        ...
+
+    def get_checkpoint(self, checkpoint_id: str) -> StoredStoryCheckpoint:
+        ...
+
+    def list_checkpoints(
+        self,
+        *,
+        session_id: str,
+        limit: int = 100,
+        offset: int = 0,
+    ) -> list[StoredStoryCheckpoint]:
+        ...
+
+    def rollback_to_checkpoint(
+        self,
+        *,
+        session_id: str,
+        checkpoint_id: str,
+    ) -> StoredStorySession:
+        ...
+
+    def create_lorebook(
+        self,
+        *,
+        project_id: str,
+        keyword: str,
+        insert_text: str,
+        sort_order: int,
+        enabled: bool,
+    ) -> StoredStoryLorebook:
+        ...
+
+    def list_lorebooks(
+        self,
+        *,
+        project_id: str,
+        enabled: bool | None = None,
+    ) -> list[StoredStoryLorebook]:
+        ...
+
+    def get_lorebook(self, lorebook_id: str) -> StoredStoryLorebook:
+        ...
+
+    def update_lorebook(
+        self,
+        lorebook_id: str,
+        *,
+        keyword: str | None = None,
+        insert_text: str | None = None,
+        sort_order: int | None = None,
+        enabled: bool | None = None,
+    ) -> StoredStoryLorebook:
+        ...
+
+    def delete_lorebook(self, lorebook_id: str) -> None:
+        ...
+
+    def find_matching_lorebooks(
+        self,
+        *,
+        project_id: str,
+        message: str,
+        max_items: int = 6,
+    ) -> list[StoredStoryLorebook]:
+        ...
+
+    def create_action(
+        self,
+        *,
+        session_id: str,
+        action_type: str,
+        selected_text: str,
+        result_payload_json: str,
+    ) -> StoredStoryAction:
+        ...
+
+    def list_actions(
+        self,
+        *,
+        session_id: str,
+        limit: int = 50,
+        offset: int = 0,
+    ) -> list[StoredStoryAction]:
         ...
 
 
@@ -2558,6 +2830,989 @@ class SQLiteGenerationRepository:
             job_id=row["job_id"],
             event_type=row["event_type"],
             payload_json=row["payload_json"],
+            created_at=datetime.fromisoformat(row["created_at"]),
+        )
+
+    @staticmethod
+    def _utcnow() -> datetime:
+        return datetime.now(timezone.utc)
+
+
+class SQLiteStoryRepository:
+    def __init__(self, db_path: Path) -> None:
+        self._db_path = db_path
+        self._db_path.parent.mkdir(parents=True, exist_ok=True)
+        self._init_schema()
+
+    def create_project(
+        self,
+        *,
+        title: str,
+        premise: str,
+        opening_scene: str,
+        system_prompt: str,
+        status: str,
+    ) -> StoredStoryProject:
+        project_id = str(uuid4())
+        now = self._utcnow().isoformat()
+        with self._connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO story_projects (
+                    project_id,
+                    title,
+                    premise,
+                    opening_scene,
+                    system_prompt,
+                    status,
+                    created_at,
+                    updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    project_id,
+                    title,
+                    premise,
+                    opening_scene,
+                    system_prompt,
+                    status,
+                    now,
+                    now,
+                ),
+            )
+        return self.get_project(project_id)
+
+    def list_projects(
+        self,
+        *,
+        limit: int = 50,
+        offset: int = 0,
+    ) -> list[StoredStoryProject]:
+        if limit < 1:
+            raise ValueError("limit must be >= 1")
+        if offset < 0:
+            raise ValueError("offset must be >= 0")
+        with self._connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT
+                    project_id,
+                    title,
+                    premise,
+                    opening_scene,
+                    system_prompt,
+                    status,
+                    created_at,
+                    updated_at
+                FROM story_projects
+                ORDER BY updated_at DESC, created_at DESC
+                LIMIT ? OFFSET ?
+                """,
+                (limit, offset),
+            ).fetchall()
+        return [self._row_to_story_project(row) for row in rows]
+
+    def get_project(self, project_id: str) -> StoredStoryProject:
+        with self._connect() as conn:
+            row = conn.execute(
+                """
+                SELECT
+                    project_id,
+                    title,
+                    premise,
+                    opening_scene,
+                    system_prompt,
+                    status,
+                    created_at,
+                    updated_at
+                FROM story_projects
+                WHERE project_id = ?
+                """,
+                (project_id,),
+            ).fetchone()
+        if row is None:
+            raise StoryProjectNotFoundError("Story project does not exist.")
+        return self._row_to_story_project(row)
+
+    def update_project(
+        self,
+        project_id: str,
+        *,
+        title: str | None = None,
+        premise: str | None = None,
+        opening_scene: str | None = None,
+        system_prompt: str | None = None,
+        status: str | None = None,
+    ) -> StoredStoryProject:
+        current = self.get_project(project_id)
+        with self._connect() as conn:
+            conn.execute(
+                """
+                UPDATE story_projects
+                SET
+                    title = ?,
+                    premise = ?,
+                    opening_scene = ?,
+                    system_prompt = ?,
+                    status = ?,
+                    updated_at = ?
+                WHERE project_id = ?
+                """,
+                (
+                    current.title if title is None else title,
+                    current.premise if premise is None else premise,
+                    current.opening_scene if opening_scene is None else opening_scene,
+                    current.system_prompt if system_prompt is None else system_prompt,
+                    current.status if status is None else status,
+                    self._utcnow().isoformat(),
+                    project_id,
+                ),
+            )
+        return self.get_project(project_id)
+
+    def delete_project(self, project_id: str) -> None:
+        self.get_project(project_id)
+        with self._connect() as conn:
+            conn.execute(
+                "DELETE FROM story_projects WHERE project_id = ?",
+                (project_id,),
+            )
+
+    def create_session(self, *, project_id: str) -> StoredStorySession:
+        self.get_project(project_id)
+        session_id = str(uuid4())
+        now = self._utcnow().isoformat()
+        with self._connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO story_sessions (
+                    session_id,
+                    project_id,
+                    current_summary,
+                    current_scene,
+                    active_checkpoint_id,
+                    created_at,
+                    updated_at
+                ) VALUES (?, ?, '', '', NULL, ?, ?)
+                """,
+                (session_id, project_id, now, now),
+            )
+        return self.get_session(session_id)
+
+    def get_session(self, session_id: str) -> StoredStorySession:
+        with self._connect() as conn:
+            row = conn.execute(
+                """
+                SELECT
+                    session_id,
+                    project_id,
+                    current_summary,
+                    current_scene,
+                    active_checkpoint_id,
+                    created_at,
+                    updated_at
+                FROM story_sessions
+                WHERE session_id = ?
+                """,
+                (session_id,),
+            ).fetchone()
+        if row is None:
+            raise StorySessionNotFoundError("Story session does not exist.")
+        return self._row_to_story_session(row)
+
+    def list_sessions(
+        self,
+        *,
+        project_id: str | None = None,
+        limit: int = 50,
+        offset: int = 0,
+    ) -> list[StoredStorySession]:
+        if limit < 1:
+            raise ValueError("limit must be >= 1")
+        if offset < 0:
+            raise ValueError("offset must be >= 0")
+        clause = ""
+        params: list[object] = []
+        if project_id is not None:
+            clause = "WHERE project_id = ?"
+            params.append(project_id)
+        params.extend([limit, offset])
+        with self._connect() as conn:
+            rows = conn.execute(
+                f"""
+                SELECT
+                    session_id,
+                    project_id,
+                    current_summary,
+                    current_scene,
+                    active_checkpoint_id,
+                    created_at,
+                    updated_at
+                FROM story_sessions
+                {clause}
+                ORDER BY updated_at DESC, created_at DESC
+                LIMIT ? OFFSET ?
+                """,
+                tuple(params),
+            ).fetchall()
+        return [self._row_to_story_session(row) for row in rows]
+
+    def update_session_state(
+        self,
+        session_id: str,
+        *,
+        current_summary: str | None = None,
+        current_scene: str | None = None,
+        active_checkpoint_id: str | None | object = UNSET,
+    ) -> StoredStorySession:
+        current = self.get_session(session_id)
+        checkpoint_value = current.active_checkpoint_id
+        if active_checkpoint_id is not UNSET:
+            checkpoint_value = active_checkpoint_id
+        with self._connect() as conn:
+            conn.execute(
+                """
+                UPDATE story_sessions
+                SET
+                    current_summary = ?,
+                    current_scene = ?,
+                    active_checkpoint_id = ?,
+                    updated_at = ?
+                WHERE session_id = ?
+                """,
+                (
+                    current.current_summary if current_summary is None else current_summary,
+                    current.current_scene if current_scene is None else current_scene,
+                    checkpoint_value,
+                    self._utcnow().isoformat(),
+                    session_id,
+                ),
+            )
+        return self.get_session(session_id)
+
+    def append_entry(
+        self,
+        *,
+        session_id: str,
+        role: str,
+        content: str,
+        entry_type: str,
+    ) -> StoredStoryEntry:
+        self.get_session(session_id)
+        entry_id = str(uuid4())
+        now = self._utcnow().isoformat()
+        with self._connect() as conn:
+            cursor = conn.execute(
+                """
+                INSERT INTO story_entries (
+                    entry_id,
+                    session_id,
+                    role,
+                    content,
+                    entry_type,
+                    created_at
+                ) VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                (entry_id, session_id, role, content, entry_type, now),
+            )
+            sequence = int(cursor.lastrowid)
+            conn.execute(
+                """
+                UPDATE story_sessions
+                SET updated_at = ?
+                WHERE session_id = ?
+                """,
+                (now, session_id),
+            )
+        return StoredStoryEntry(
+            entry_id=entry_id,
+            session_id=session_id,
+            role=role,
+            content=content,
+            entry_type=entry_type,
+            sequence=sequence,
+            created_at=datetime.fromisoformat(now),
+        )
+
+    def get_history(self, session_id: str) -> list[StoredStoryEntry]:
+        self.get_session(session_id)
+        with self._connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT
+                    id AS sequence,
+                    entry_id,
+                    session_id,
+                    role,
+                    content,
+                    entry_type,
+                    created_at
+                FROM story_entries
+                WHERE session_id = ?
+                ORDER BY id ASC
+                """,
+                (session_id,),
+            ).fetchall()
+        return [self._row_to_story_entry(row) for row in rows]
+
+    def count_entries(self, session_id: str) -> int:
+        self.get_session(session_id)
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT COUNT(1) AS c FROM story_entries WHERE session_id = ?",
+                (session_id,),
+            ).fetchone()
+        return int(row["c"]) if row is not None else 0
+
+    def replace_facts(self, *, session_id: str, facts: list[str]) -> list[StoredStoryFact]:
+        self.get_session(session_id)
+        now = self._utcnow().isoformat()
+        with self._connect() as conn:
+            conn.execute("DELETE FROM story_facts WHERE session_id = ?", (session_id,))
+            for idx, fact in enumerate(facts):
+                conn.execute(
+                    """
+                    INSERT INTO story_facts (
+                        fact_id,
+                        session_id,
+                        fact_text,
+                        sort_order,
+                        created_at,
+                        updated_at
+                    ) VALUES (?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        str(uuid4()),
+                        session_id,
+                        fact,
+                        idx,
+                        now,
+                        now,
+                    ),
+                )
+        return self.list_facts(session_id)
+
+    def list_facts(self, session_id: str) -> list[StoredStoryFact]:
+        self.get_session(session_id)
+        with self._connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT
+                    fact_id,
+                    session_id,
+                    fact_text,
+                    sort_order,
+                    created_at,
+                    updated_at
+                FROM story_facts
+                WHERE session_id = ?
+                ORDER BY sort_order ASC, updated_at ASC
+                """,
+                (session_id,),
+            ).fetchall()
+        return [self._row_to_story_fact(row) for row in rows]
+
+    def create_checkpoint(
+        self,
+        *,
+        session_id: str,
+        title: str,
+        summary_text: str,
+        current_scene: str,
+        facts_json: str,
+        last_sequence: int,
+    ) -> StoredStoryCheckpoint:
+        self.get_session(session_id)
+        checkpoint_id = str(uuid4())
+        now = self._utcnow().isoformat()
+        with self._connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO story_checkpoints (
+                    checkpoint_id,
+                    session_id,
+                    title,
+                    summary_text,
+                    current_scene,
+                    facts_json,
+                    last_sequence,
+                    created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    checkpoint_id,
+                    session_id,
+                    title,
+                    summary_text,
+                    current_scene,
+                    facts_json,
+                    last_sequence,
+                    now,
+                ),
+            )
+        return self.get_checkpoint(checkpoint_id)
+
+    def get_checkpoint(self, checkpoint_id: str) -> StoredStoryCheckpoint:
+        with self._connect() as conn:
+            row = conn.execute(
+                """
+                SELECT
+                    checkpoint_id,
+                    session_id,
+                    title,
+                    summary_text,
+                    current_scene,
+                    facts_json,
+                    last_sequence,
+                    created_at
+                FROM story_checkpoints
+                WHERE checkpoint_id = ?
+                """,
+                (checkpoint_id,),
+            ).fetchone()
+        if row is None:
+            raise StoryCheckpointNotFoundError("Story checkpoint does not exist.")
+        return self._row_to_story_checkpoint(row)
+
+    def list_checkpoints(
+        self,
+        *,
+        session_id: str,
+        limit: int = 100,
+        offset: int = 0,
+    ) -> list[StoredStoryCheckpoint]:
+        self.get_session(session_id)
+        if limit < 1:
+            raise ValueError("limit must be >= 1")
+        if offset < 0:
+            raise ValueError("offset must be >= 0")
+        with self._connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT
+                    checkpoint_id,
+                    session_id,
+                    title,
+                    summary_text,
+                    current_scene,
+                    facts_json,
+                    last_sequence,
+                    created_at
+                FROM story_checkpoints
+                WHERE session_id = ?
+                ORDER BY created_at DESC
+                LIMIT ? OFFSET ?
+                """,
+                (session_id, limit, offset),
+            ).fetchall()
+        return [self._row_to_story_checkpoint(row) for row in rows]
+
+    def rollback_to_checkpoint(
+        self,
+        *,
+        session_id: str,
+        checkpoint_id: str,
+    ) -> StoredStorySession:
+        checkpoint = self.get_checkpoint(checkpoint_id)
+        if checkpoint.session_id != session_id:
+            raise StoryCheckpointNotFoundError("Checkpoint does not belong to this session.")
+        self.get_session(session_id)
+        try:
+            facts = json.loads(checkpoint.facts_json)
+        except Exception:
+            facts = []
+        if not isinstance(facts, list):
+            facts = []
+        normalized_facts = [str(item).strip() for item in facts if str(item).strip()]
+        with self._connect() as conn:
+            conn.execute(
+                "DELETE FROM story_entries WHERE session_id = ? AND id > ?",
+                (session_id, checkpoint.last_sequence),
+            )
+            conn.execute("DELETE FROM story_facts WHERE session_id = ?", (session_id,))
+            now = self._utcnow().isoformat()
+            for idx, fact in enumerate(normalized_facts):
+                conn.execute(
+                    """
+                    INSERT INTO story_facts (
+                        fact_id,
+                        session_id,
+                        fact_text,
+                        sort_order,
+                        created_at,
+                        updated_at
+                    ) VALUES (?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        str(uuid4()),
+                        session_id,
+                        fact,
+                        idx,
+                        now,
+                        now,
+                    ),
+                )
+            conn.execute(
+                """
+                UPDATE story_sessions
+                SET
+                    current_summary = ?,
+                    current_scene = ?,
+                    active_checkpoint_id = ?,
+                    updated_at = ?
+                WHERE session_id = ?
+                """,
+                (
+                    checkpoint.summary_text,
+                    checkpoint.current_scene,
+                    checkpoint.checkpoint_id,
+                    now,
+                    session_id,
+                ),
+            )
+        return self.get_session(session_id)
+
+    def create_lorebook(
+        self,
+        *,
+        project_id: str,
+        keyword: str,
+        insert_text: str,
+        sort_order: int,
+        enabled: bool,
+    ) -> StoredStoryLorebook:
+        self.get_project(project_id)
+        lorebook_id = str(uuid4())
+        now = self._utcnow().isoformat()
+        with self._connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO story_lorebooks (
+                    lorebook_id,
+                    project_id,
+                    keyword,
+                    insert_text,
+                    sort_order,
+                    enabled,
+                    created_at,
+                    updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    lorebook_id,
+                    project_id,
+                    keyword,
+                    insert_text,
+                    sort_order,
+                    1 if enabled else 0,
+                    now,
+                    now,
+                ),
+            )
+        return self.get_lorebook(lorebook_id)
+
+    def list_lorebooks(
+        self,
+        *,
+        project_id: str,
+        enabled: bool | None = None,
+    ) -> list[StoredStoryLorebook]:
+        self.get_project(project_id)
+        params: list[object] = [project_id]
+        clause = ""
+        if enabled is not None:
+            clause = "AND enabled = ?"
+            params.append(1 if enabled else 0)
+        with self._connect() as conn:
+            rows = conn.execute(
+                f"""
+                SELECT
+                    lorebook_id,
+                    project_id,
+                    keyword,
+                    insert_text,
+                    sort_order,
+                    enabled,
+                    created_at,
+                    updated_at
+                FROM story_lorebooks
+                WHERE project_id = ?
+                {clause}
+                ORDER BY sort_order ASC, updated_at DESC
+                """,
+                tuple(params),
+            ).fetchall()
+        return [self._row_to_story_lorebook(row) for row in rows]
+
+    def get_lorebook(self, lorebook_id: str) -> StoredStoryLorebook:
+        with self._connect() as conn:
+            row = conn.execute(
+                """
+                SELECT
+                    lorebook_id,
+                    project_id,
+                    keyword,
+                    insert_text,
+                    sort_order,
+                    enabled,
+                    created_at,
+                    updated_at
+                FROM story_lorebooks
+                WHERE lorebook_id = ?
+                """,
+                (lorebook_id,),
+            ).fetchone()
+        if row is None:
+            raise StoryLorebookNotFoundError("Story lorebook does not exist.")
+        return self._row_to_story_lorebook(row)
+
+    def update_lorebook(
+        self,
+        lorebook_id: str,
+        *,
+        keyword: str | None = None,
+        insert_text: str | None = None,
+        sort_order: int | None = None,
+        enabled: bool | None = None,
+    ) -> StoredStoryLorebook:
+        current = self.get_lorebook(lorebook_id)
+        with self._connect() as conn:
+            conn.execute(
+                """
+                UPDATE story_lorebooks
+                SET
+                    keyword = ?,
+                    insert_text = ?,
+                    sort_order = ?,
+                    enabled = ?,
+                    updated_at = ?
+                WHERE lorebook_id = ?
+                """,
+                (
+                    current.keyword if keyword is None else keyword,
+                    current.insert_text if insert_text is None else insert_text,
+                    current.sort_order if sort_order is None else sort_order,
+                    int(current.enabled if enabled is None else enabled),
+                    self._utcnow().isoformat(),
+                    lorebook_id,
+                ),
+            )
+        return self.get_lorebook(lorebook_id)
+
+    def delete_lorebook(self, lorebook_id: str) -> None:
+        self.get_lorebook(lorebook_id)
+        with self._connect() as conn:
+            conn.execute("DELETE FROM story_lorebooks WHERE lorebook_id = ?", (lorebook_id,))
+
+    def find_matching_lorebooks(
+        self,
+        *,
+        project_id: str,
+        message: str,
+        max_items: int = 6,
+    ) -> list[StoredStoryLorebook]:
+        normalized = message.lower()
+        candidates = self.list_lorebooks(project_id=project_id, enabled=True)
+        matched: list[StoredStoryLorebook] = []
+        for item in candidates:
+            keyword = item.keyword.strip().lower()
+            if not keyword:
+                continue
+            if keyword in normalized:
+                matched.append(item)
+            if len(matched) >= max_items:
+                break
+        return matched
+
+    def create_action(
+        self,
+        *,
+        session_id: str,
+        action_type: str,
+        selected_text: str,
+        result_payload_json: str,
+    ) -> StoredStoryAction:
+        self.get_session(session_id)
+        action_id = str(uuid4())
+        now = self._utcnow().isoformat()
+        with self._connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO story_actions (
+                    action_id,
+                    session_id,
+                    action_type,
+                    selected_text,
+                    result_payload_json,
+                    created_at
+                ) VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    action_id,
+                    session_id,
+                    action_type,
+                    selected_text,
+                    result_payload_json,
+                    now,
+                ),
+            )
+        return StoredStoryAction(
+            action_id=action_id,
+            session_id=session_id,
+            action_type=action_type,
+            selected_text=selected_text,
+            result_payload_json=result_payload_json,
+            created_at=datetime.fromisoformat(now),
+        )
+
+    def list_actions(
+        self,
+        *,
+        session_id: str,
+        limit: int = 50,
+        offset: int = 0,
+    ) -> list[StoredStoryAction]:
+        self.get_session(session_id)
+        safe_limit = max(1, min(limit, 200))
+        safe_offset = max(0, offset)
+        with self._connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT
+                    action_id,
+                    session_id,
+                    action_type,
+                    selected_text,
+                    result_payload_json,
+                    created_at
+                FROM story_actions
+                WHERE session_id = ?
+                ORDER BY created_at DESC
+                LIMIT ? OFFSET ?
+                """,
+                (session_id, safe_limit, safe_offset),
+            ).fetchall()
+        return [self._row_to_story_action(row) for row in rows]
+
+    def _init_schema(self) -> None:
+        with self._connect() as conn:
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS story_projects (
+                    project_id TEXT PRIMARY KEY,
+                    title TEXT NOT NULL,
+                    premise TEXT NOT NULL,
+                    opening_scene TEXT NOT NULL DEFAULT '',
+                    system_prompt TEXT NOT NULL DEFAULT '',
+                    status TEXT NOT NULL DEFAULT 'active',
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                )
+                """
+            )
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS story_sessions (
+                    session_id TEXT PRIMARY KEY,
+                    project_id TEXT NOT NULL,
+                    current_summary TEXT NOT NULL DEFAULT '',
+                    current_scene TEXT NOT NULL DEFAULT '',
+                    active_checkpoint_id TEXT,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    FOREIGN KEY (project_id) REFERENCES story_projects(project_id) ON DELETE CASCADE
+                )
+                """
+            )
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS story_entries (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    entry_id TEXT NOT NULL UNIQUE,
+                    session_id TEXT NOT NULL,
+                    role TEXT NOT NULL,
+                    content TEXT NOT NULL,
+                    entry_type TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    FOREIGN KEY (session_id) REFERENCES story_sessions(session_id) ON DELETE CASCADE
+                )
+                """
+            )
+            conn.execute(
+                """
+                CREATE INDEX IF NOT EXISTS idx_story_entries_session
+                ON story_entries (session_id, id ASC)
+                """
+            )
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS story_facts (
+                    fact_id TEXT PRIMARY KEY,
+                    session_id TEXT NOT NULL,
+                    fact_text TEXT NOT NULL,
+                    sort_order INTEGER NOT NULL DEFAULT 0,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    FOREIGN KEY (session_id) REFERENCES story_sessions(session_id) ON DELETE CASCADE
+                )
+                """
+            )
+            conn.execute(
+                """
+                CREATE INDEX IF NOT EXISTS idx_story_facts_session
+                ON story_facts (session_id, sort_order ASC, updated_at ASC)
+                """
+            )
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS story_checkpoints (
+                    checkpoint_id TEXT PRIMARY KEY,
+                    session_id TEXT NOT NULL,
+                    title TEXT NOT NULL,
+                    summary_text TEXT NOT NULL DEFAULT '',
+                    current_scene TEXT NOT NULL DEFAULT '',
+                    facts_json TEXT NOT NULL DEFAULT '[]',
+                    last_sequence INTEGER NOT NULL DEFAULT 0,
+                    created_at TEXT NOT NULL,
+                    FOREIGN KEY (session_id) REFERENCES story_sessions(session_id) ON DELETE CASCADE
+                )
+                """
+            )
+            conn.execute(
+                """
+                CREATE INDEX IF NOT EXISTS idx_story_checkpoints_session
+                ON story_checkpoints (session_id, created_at DESC)
+                """
+            )
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS story_lorebooks (
+                    lorebook_id TEXT PRIMARY KEY,
+                    project_id TEXT NOT NULL,
+                    keyword TEXT NOT NULL,
+                    insert_text TEXT NOT NULL,
+                    sort_order INTEGER NOT NULL DEFAULT 100,
+                    enabled INTEGER NOT NULL DEFAULT 1,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    FOREIGN KEY (project_id) REFERENCES story_projects(project_id) ON DELETE CASCADE
+                )
+                """
+            )
+            conn.execute(
+                """
+                CREATE INDEX IF NOT EXISTS idx_story_lorebooks_lookup
+                ON story_lorebooks (project_id, enabled, sort_order, updated_at DESC)
+                """
+            )
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS story_actions (
+                    action_id TEXT PRIMARY KEY,
+                    session_id TEXT NOT NULL,
+                    action_type TEXT NOT NULL,
+                    selected_text TEXT NOT NULL,
+                    result_payload_json TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    FOREIGN KEY (session_id) REFERENCES story_sessions(session_id) ON DELETE CASCADE
+                )
+                """
+            )
+            conn.execute(
+                """
+                CREATE INDEX IF NOT EXISTS idx_story_actions_session
+                ON story_actions (session_id, created_at DESC)
+                """
+            )
+
+    def _connect(self) -> sqlite3.Connection:
+        conn = sqlite3.connect(self._db_path)
+        conn.row_factory = sqlite3.Row
+        conn.execute("PRAGMA foreign_keys = ON")
+        return conn
+
+    @staticmethod
+    def _row_to_story_project(row: sqlite3.Row) -> StoredStoryProject:
+        return StoredStoryProject(
+            project_id=row["project_id"],
+            title=row["title"],
+            premise=row["premise"],
+            opening_scene=row["opening_scene"],
+            system_prompt=row["system_prompt"],
+            status=row["status"],
+            created_at=datetime.fromisoformat(row["created_at"]),
+            updated_at=datetime.fromisoformat(row["updated_at"]),
+        )
+
+    @staticmethod
+    def _row_to_story_session(row: sqlite3.Row) -> StoredStorySession:
+        return StoredStorySession(
+            session_id=row["session_id"],
+            project_id=row["project_id"],
+            current_summary=row["current_summary"],
+            current_scene=row["current_scene"],
+            active_checkpoint_id=row["active_checkpoint_id"],
+            created_at=datetime.fromisoformat(row["created_at"]),
+            updated_at=datetime.fromisoformat(row["updated_at"]),
+        )
+
+    @staticmethod
+    def _row_to_story_entry(row: sqlite3.Row) -> StoredStoryEntry:
+        return StoredStoryEntry(
+            entry_id=row["entry_id"],
+            session_id=row["session_id"],
+            role=row["role"],
+            content=row["content"],
+            entry_type=row["entry_type"],
+            sequence=int(row["sequence"]),
+            created_at=datetime.fromisoformat(row["created_at"]),
+        )
+
+    @staticmethod
+    def _row_to_story_fact(row: sqlite3.Row) -> StoredStoryFact:
+        return StoredStoryFact(
+            fact_id=row["fact_id"],
+            session_id=row["session_id"],
+            fact_text=row["fact_text"],
+            sort_order=int(row["sort_order"]),
+            created_at=datetime.fromisoformat(row["created_at"]),
+            updated_at=datetime.fromisoformat(row["updated_at"]),
+        )
+
+    @staticmethod
+    def _row_to_story_checkpoint(row: sqlite3.Row) -> StoredStoryCheckpoint:
+        return StoredStoryCheckpoint(
+            checkpoint_id=row["checkpoint_id"],
+            session_id=row["session_id"],
+            title=row["title"],
+            summary_text=row["summary_text"],
+            current_scene=row["current_scene"],
+            facts_json=row["facts_json"],
+            last_sequence=int(row["last_sequence"]),
+            created_at=datetime.fromisoformat(row["created_at"]),
+        )
+
+    @staticmethod
+    def _row_to_story_lorebook(row: sqlite3.Row) -> StoredStoryLorebook:
+        return StoredStoryLorebook(
+            lorebook_id=row["lorebook_id"],
+            project_id=row["project_id"],
+            keyword=row["keyword"],
+            insert_text=row["insert_text"],
+            sort_order=int(row["sort_order"]),
+            enabled=bool(row["enabled"]),
+            created_at=datetime.fromisoformat(row["created_at"]),
+            updated_at=datetime.fromisoformat(row["updated_at"]),
+        )
+
+    @staticmethod
+    def _row_to_story_action(row: sqlite3.Row) -> StoredStoryAction:
+        return StoredStoryAction(
+            action_id=row["action_id"],
+            session_id=row["session_id"],
+            action_type=row["action_type"],
+            selected_text=row["selected_text"],
+            result_payload_json=row["result_payload_json"],
             created_at=datetime.fromisoformat(row["created_at"]),
         )
 

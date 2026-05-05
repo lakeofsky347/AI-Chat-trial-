@@ -52,6 +52,22 @@ from app.schemas import (
     ModelEndpointResponse,
     ModelEndpointUpdateRequest,
     QuotaStatusResponse,
+    StoryCheckpointResponse,
+    StoryContextStatsResponse,
+    StoryContinueRequest,
+    StoryContinueResponse,
+    StoryAigcActionRequest,
+    StoryAigcActionResponse,
+    StoryEntryResponse,
+    StoryFactResponse,
+    StoryHistoryResponse,
+    StoryLorebookCreateRequest,
+    StoryLorebookResponse,
+    StoryLorebookUpdateRequest,
+    StoryProjectCreateRequest,
+    StoryProjectResponse,
+    StoryProjectUpdateRequest,
+    StorySessionResponse,
     TrialProxyConfigResponse,
     TrialProxyConfigUpdateRequest,
     TrialProxyHealthResponse,
@@ -81,6 +97,11 @@ from app.repositories import (
     SQLiteLorebookRepository,
     SQLiteModelEndpointRepository,
     SQLiteSessionRepository,
+    SQLiteStoryRepository,
+    StoryCheckpointNotFoundError,
+    StoryLorebookNotFoundError,
+    StoryProjectNotFoundError,
+    StorySessionNotFoundError,
 )
 from app.services import (
     AppSettingsService,
@@ -102,6 +123,8 @@ from app.services import (
     UpstreamModelError,
     WELCOME_MESSAGE,
     WizardService,
+    StoryService,
+    StoryAigcActionPublic,
 )
 
 app = FastAPI(title="Prototype Chat Service", version="0.1.0")
@@ -239,14 +262,25 @@ def _bootstrap_private_model_endpoints(model_endpoint_service: ModelEndpointServ
             continue
 
 
-base_dir = Path(__file__).resolve().parent.parent
-_load_local_env_file(base_dir)
-static_dir = base_dir / "static"
-data_dir = base_dir / "data"
+def _get_user_data_dir(app_name: str) -> Path:
+    if os.name == "nt":
+        base = os.getenv("APPDATA")
+        if base:
+            return Path(base) / app_name
+    return Path.home() / ".local" / "share" / app_name
+
+
+project_root = Path(__file__).resolve().parent.parent
+bundle_root = Path(getattr(sys, "_MEIPASS", project_root))
+config_root = Path(sys.executable).resolve().parent if getattr(sys, "frozen", False) else project_root
+_load_local_env_file(config_root)
+static_dir = bundle_root / "static"
+data_dir = _get_user_data_dir("AIChatTrial") if getattr(sys, "frozen", False) else project_root / "data"
 assets_dir = data_dir / "assets"
 chat_db_path = data_dir / "chat.db"
 quota_db_path = data_dir / "quota.db"
-static_dir.mkdir(parents=True, exist_ok=True)
+if not getattr(sys, "frozen", False):
+    static_dir.mkdir(parents=True, exist_ok=True)
 data_dir.mkdir(parents=True, exist_ok=True)
 assets_dir.mkdir(parents=True, exist_ok=True)
 
@@ -258,6 +292,7 @@ asset_repository = SQLiteAssetRepository(chat_db_path)
 app_settings_repository = SQLiteAppSettingsRepository(chat_db_path)
 model_endpoint_repository = SQLiteModelEndpointRepository(chat_db_path)
 generation_repository = SQLiteGenerationRepository(chat_db_path)
+story_repository = SQLiteStoryRepository(chat_db_path)
 app_settings_service = AppSettingsService(app_settings_repository)
 _bootstrap_private_settings(app_settings_service)
 model_endpoint_service = ModelEndpointService(model_endpoint_repository)
@@ -269,12 +304,6 @@ wizard_service = WizardService(
     app_settings_service,
     search_client=search_client,
     model_endpoint_service=model_endpoint_service,
-)
-generation_service = GenerationService(
-    generation_repository=generation_repository,
-    wizard_service=wizard_service,
-    model_endpoint_service=model_endpoint_service,
-    app_settings_service=app_settings_service,
 )
 chat_service = ChatService(
     session_repository,
@@ -291,6 +320,19 @@ character_draft_service = CharacterDraftService(
     draft_repository=character_draft_repository,
 )
 lorebook_service = LorebookService(lorebook_repository)
+story_service = StoryService(
+    story_repository,
+    app_settings_service=app_settings_service,
+    model_endpoint_service=model_endpoint_service,
+    tool_runtime=tool_runtime,
+)
+generation_service = GenerationService(
+    generation_repository=generation_repository,
+    wizard_service=wizard_service,
+    model_endpoint_service=model_endpoint_service,
+    app_settings_service=app_settings_service,
+    story_service=story_service,
+)
 asset_service = AssetService(
     asset_repository,
     asset_dir=assets_dir,
@@ -502,9 +544,21 @@ def create_generation_job(
 ) -> GenerationJobResponse:
     try:
         if payload.run_async:
-            job, include_illustration_prompt, include_audio_plan = (
+            (
+                job,
+                pipeline_type,
+                apply_mode,
+                story_project_id,
+                story_draft_payload,
+                include_illustration_prompt,
+                include_audio_plan,
+            ) = (
                 generation_service.submit_job_async(
                     user_input=payload.user_input,
+                    pipeline_type=payload.pipeline_type,
+                    apply_mode=payload.apply_mode,
+                    story_project_id=payload.story_project_id,
+                    story_draft_payload=payload.story_draft_payload,
                     include_illustration_prompt=payload.include_illustration_prompt,
                     include_audio_plan=payload.include_audio_plan,
                 )
@@ -512,12 +566,20 @@ def create_generation_job(
             background_tasks.add_task(
                 generation_service.execute_job,
                 job.job_id,
+                pipeline_type=pipeline_type,
+                apply_mode=apply_mode,
+                story_project_id=story_project_id,
+                story_draft_payload=story_draft_payload,
                 include_illustration_prompt=include_illustration_prompt,
                 include_audio_plan=include_audio_plan,
             )
         else:
             job = generation_service.submit_job(
                 user_input=payload.user_input,
+                pipeline_type=payload.pipeline_type,
+                apply_mode=payload.apply_mode,
+                story_project_id=payload.story_project_id,
+                story_draft_payload=payload.story_draft_payload,
                 include_illustration_prompt=payload.include_illustration_prompt,
                 include_audio_plan=payload.include_audio_plan,
             )
@@ -566,19 +628,37 @@ def rerun_generation_job(
     try:
         (
             user_input,
+            pipeline_type,
+            apply_mode,
+            story_project_id,
             include_illustration_prompt,
             include_audio_plan,
         ) = generation_service.resolve_rerun_payload(
             job_id,
             user_input=payload.user_input,
+            pipeline_type=payload.pipeline_type,
+            apply_mode=payload.apply_mode,
+            story_project_id=payload.story_project_id,
             include_illustration_prompt=payload.include_illustration_prompt,
             include_audio_plan=payload.include_audio_plan,
         )
 
         if payload.run_async:
-            job, include_illustration_prompt, include_audio_plan = (
+            (
+                job,
+                pipeline_type,
+                apply_mode,
+                story_project_id,
+                story_draft_payload,
+                include_illustration_prompt,
+                include_audio_plan,
+            ) = (
                 generation_service.submit_job_async(
                     user_input=user_input,
+                    pipeline_type=pipeline_type,
+                    apply_mode=apply_mode,
+                    story_project_id=story_project_id,
+                    story_draft_payload=payload.story_draft_payload,
                     include_illustration_prompt=include_illustration_prompt,
                     include_audio_plan=include_audio_plan,
                 )
@@ -586,12 +666,20 @@ def rerun_generation_job(
             background_tasks.add_task(
                 generation_service.execute_job,
                 job.job_id,
+                pipeline_type=pipeline_type,
+                apply_mode=apply_mode,
+                story_project_id=story_project_id,
+                story_draft_payload=story_draft_payload,
                 include_illustration_prompt=include_illustration_prompt,
                 include_audio_plan=include_audio_plan,
             )
         else:
             job = generation_service.submit_job(
                 user_input=user_input,
+                pipeline_type=pipeline_type,
+                apply_mode=apply_mode,
+                story_project_id=story_project_id,
+                story_draft_payload=payload.story_draft_payload,
                 include_illustration_prompt=include_illustration_prompt,
                 include_audio_plan=include_audio_plan,
             )
@@ -668,6 +756,45 @@ def _character_to_response(character) -> CharacterResponse:
 
 def _lorebook_to_response(lorebook) -> LorebookResponse:
     return _to_response(LorebookResponse, lorebook)
+
+
+def _story_project_to_response(project) -> StoryProjectResponse:
+    return _to_response(StoryProjectResponse, project)
+
+
+def _story_session_to_response(session) -> StorySessionResponse:
+    return _to_response(StorySessionResponse, session)
+
+
+def _story_entry_to_response(entry) -> StoryEntryResponse:
+    return _to_response(StoryEntryResponse, entry)
+
+
+def _story_fact_to_response(fact) -> StoryFactResponse:
+    return _to_response(StoryFactResponse, fact)
+
+
+def _story_lorebook_to_response(lorebook) -> StoryLorebookResponse:
+    return _to_response(StoryLorebookResponse, lorebook)
+
+
+def _story_checkpoint_to_response(checkpoint) -> StoryCheckpointResponse:
+    facts: list[str] = []
+    try:
+        parsed = json.loads(getattr(checkpoint, "facts_json", "[]"))
+        if isinstance(parsed, list):
+            facts = [str(item) for item in parsed]
+    except Exception:
+        facts = []
+    return _to_response(StoryCheckpointResponse, checkpoint, extra={"facts": facts})
+
+
+def _story_context_stats_to_response(stats) -> StoryContextStatsResponse:
+    return _to_response(StoryContextStatsResponse, stats)
+
+
+def _story_action_to_response(action: StoryAigcActionPublic) -> StoryAigcActionResponse:
+    return _to_response(StoryAigcActionResponse, action)
 
 
 def _session_to_response(session) -> ChatSessionSummaryResponse:
@@ -1018,6 +1145,286 @@ def delete_lorebook(lorebook_id: str) -> Response:
     except LorebookNotFoundError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+
+@app.post("/api/story/projects", response_model=StoryProjectResponse)
+def create_story_project(payload: StoryProjectCreateRequest) -> StoryProjectResponse:
+    project = story_service.create_project(
+        title=payload.title,
+        premise=payload.premise,
+        opening_scene=payload.opening_scene,
+        system_prompt=payload.system_prompt,
+    )
+    return _story_project_to_response(project)
+
+
+@app.get("/api/story/projects", response_model=list[StoryProjectResponse])
+def list_story_projects(
+    limit: int = Query(default=50, ge=1, le=200),
+    offset: int = Query(default=0, ge=0),
+) -> list[StoryProjectResponse]:
+    projects = story_service.list_projects(limit=limit, offset=offset)
+    return [_story_project_to_response(item) for item in projects]
+
+
+@app.get("/api/story/projects/{project_id}", response_model=StoryProjectResponse)
+def get_story_project(project_id: str) -> StoryProjectResponse:
+    try:
+        project = story_service.get_project(project_id)
+    except StoryProjectNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    return _story_project_to_response(project)
+
+
+@app.put("/api/story/projects/{project_id}", response_model=StoryProjectResponse)
+def update_story_project(
+    project_id: str,
+    payload: StoryProjectUpdateRequest,
+) -> StoryProjectResponse:
+    updates = payload.model_dump(exclude_unset=True)
+    try:
+        project = story_service.update_project(
+            project_id,
+            title=updates.get("title"),
+            premise=updates.get("premise"),
+            opening_scene=updates.get("opening_scene"),
+            system_prompt=updates.get("system_prompt"),
+            status=updates.get("status"),
+        )
+    except StoryProjectNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    return _story_project_to_response(project)
+
+
+@app.delete("/api/story/projects/{project_id}", status_code=status.HTTP_204_NO_CONTENT)
+def delete_story_project(project_id: str) -> Response:
+    try:
+        story_service.delete_project(project_id)
+    except StoryProjectNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+
+@app.post(
+    "/api/story/projects/{project_id}/lorebooks",
+    response_model=StoryLorebookResponse,
+)
+def create_story_lorebook(
+    project_id: str,
+    payload: StoryLorebookCreateRequest,
+) -> StoryLorebookResponse:
+    try:
+        lorebook = story_service.create_lorebook(
+            project_id=project_id,
+            keyword=payload.keyword,
+            insert_text=payload.insert_text,
+            sort_order=payload.sort_order,
+            enabled=payload.enabled,
+        )
+    except StoryProjectNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return _story_lorebook_to_response(lorebook)
+
+
+@app.get(
+    "/api/story/projects/{project_id}/lorebooks",
+    response_model=list[StoryLorebookResponse],
+)
+def list_story_lorebooks(
+    project_id: str,
+    enabled: bool | None = None,
+) -> list[StoryLorebookResponse]:
+    try:
+        lorebooks = story_service.list_lorebooks(project_id=project_id, enabled=enabled)
+    except StoryProjectNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    return [_story_lorebook_to_response(item) for item in lorebooks]
+
+
+@app.put("/api/story/lorebooks/{lorebook_id}", response_model=StoryLorebookResponse)
+def update_story_lorebook(
+    lorebook_id: str,
+    payload: StoryLorebookUpdateRequest,
+) -> StoryLorebookResponse:
+    updates = payload.model_dump(exclude_unset=True)
+    try:
+        lorebook = story_service.update_lorebook(
+            lorebook_id,
+            keyword=updates.get("keyword"),
+            insert_text=updates.get("insert_text"),
+            sort_order=updates.get("sort_order"),
+            enabled=updates.get("enabled"),
+        )
+    except StoryLorebookNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return _story_lorebook_to_response(lorebook)
+
+
+@app.delete("/api/story/lorebooks/{lorebook_id}", status_code=status.HTTP_204_NO_CONTENT)
+def delete_story_lorebook(lorebook_id: str) -> Response:
+    try:
+        story_service.delete_lorebook(lorebook_id)
+    except StoryLorebookNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+
+@app.post("/api/story/projects/{project_id}/sessions", response_model=StorySessionResponse)
+def start_story_session(project_id: str) -> StorySessionResponse:
+    try:
+        session = story_service.start_session(project_id)
+    except StoryProjectNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    return _story_session_to_response(session)
+
+
+@app.get("/api/story/sessions", response_model=list[StorySessionResponse])
+def list_story_sessions(
+    project_id: str | None = None,
+    limit: int = Query(default=50, ge=1, le=200),
+    offset: int = Query(default=0, ge=0),
+) -> list[StorySessionResponse]:
+    sessions = story_service.list_sessions(project_id=project_id, limit=limit, offset=offset)
+    return [_story_session_to_response(item) for item in sessions]
+
+
+@app.get("/api/story/sessions/{session_id}", response_model=StorySessionResponse)
+def get_story_session(session_id: str) -> StorySessionResponse:
+    try:
+        session = story_service.get_session(session_id)
+    except StorySessionNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    return _story_session_to_response(session)
+
+
+@app.post("/api/story/message", response_model=StoryContinueResponse)
+def continue_story(payload: StoryContinueRequest) -> StoryContinueResponse:
+    try:
+        result = story_service.continue_story(
+            session_id=payload.session_id,
+            message=payload.message,
+        )
+    except StorySessionNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except StoryProjectNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except UpstreamModelError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+    return StoryContinueResponse(
+        session_id=result.session_id,
+        reply=result.reply,
+        checkpoint_id=result.checkpoint_id,
+        entry_count=result.entry_count,
+        context_stats=_story_context_stats_to_response(result.context_stats),
+    )
+
+
+@app.post("/api/story/actions", response_model=StoryAigcActionResponse)
+def create_story_action(payload: StoryAigcActionRequest) -> StoryAigcActionResponse:
+    try:
+        action = story_service.run_story_action(
+            session_id=payload.session_id,
+            action_type=payload.action_type,
+            selected_text=payload.selected_text,
+            style=payload.style,
+            shot=payload.shot,
+            voice=payload.voice,
+        )
+    except StorySessionNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return _story_action_to_response(action)
+
+
+@app.get("/api/story/actions/{session_id}", response_model=list[StoryAigcActionResponse])
+def list_story_actions(
+    session_id: str,
+    limit: int = Query(default=50, ge=1, le=200),
+    offset: int = Query(default=0, ge=0),
+) -> list[StoryAigcActionResponse]:
+    try:
+        items = story_service.list_story_actions(
+            session_id=session_id,
+            limit=limit,
+            offset=offset,
+        )
+    except StorySessionNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    return [_story_action_to_response(item) for item in items]
+
+
+@app.get("/api/story/history/{session_id}", response_model=StoryHistoryResponse)
+def get_story_history(session_id: str) -> StoryHistoryResponse:
+    try:
+        history = story_service.get_history(session_id)
+    except StorySessionNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    return StoryHistoryResponse(
+        session_id=session_id,
+        history=[_story_entry_to_response(item) for item in history],
+    )
+
+
+@app.get("/api/story/context/{session_id}/stats", response_model=StoryContextStatsResponse)
+def get_story_context_stats(session_id: str) -> StoryContextStatsResponse:
+    try:
+        stats = story_service.get_context_stats(session_id)
+    except StorySessionNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    return _story_context_stats_to_response(stats)
+
+
+@app.get("/api/story/facts/{session_id}", response_model=list[StoryFactResponse])
+def list_story_facts(session_id: str) -> list[StoryFactResponse]:
+    try:
+        facts = story_service.list_facts(session_id)
+    except StorySessionNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    return [_story_fact_to_response(item) for item in facts]
+
+
+@app.get(
+    "/api/story/sessions/{session_id}/checkpoints",
+    response_model=list[StoryCheckpointResponse],
+)
+def list_story_checkpoints(
+    session_id: str,
+    limit: int = Query(default=100, ge=1, le=500),
+    offset: int = Query(default=0, ge=0),
+) -> list[StoryCheckpointResponse]:
+    try:
+        checkpoints = story_service.list_checkpoints(
+            session_id=session_id,
+            limit=limit,
+            offset=offset,
+        )
+    except StorySessionNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    return [_story_checkpoint_to_response(item) for item in checkpoints]
+
+
+@app.post(
+    "/api/story/sessions/{session_id}/rollback/{checkpoint_id}",
+    response_model=StorySessionResponse,
+)
+def rollback_story_session(session_id: str, checkpoint_id: str) -> StorySessionResponse:
+    try:
+        session = story_service.rollback_to_checkpoint(
+            session_id=session_id,
+            checkpoint_id=checkpoint_id,
+        )
+    except StorySessionNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except StoryCheckpointNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    return _story_session_to_response(session)
 
 
 @app.post("/api/chat/start", response_model=ChatStartResponse)

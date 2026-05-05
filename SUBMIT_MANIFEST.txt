@@ -11,7 +11,7 @@ app\services.py
 clients\__init__.py
 clients\flet_client_main.py
 docs\frontend_technical_spec_2026-04-13.md
-docs\progress_snapshot_2026-04-28.md
+docs\progress_snapshot_2026-05-05_story_draft_desktop.md
 flet_client.py
 main.py
 README.md

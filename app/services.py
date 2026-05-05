@@ -16,7 +16,13 @@ from uuid import uuid4
 import httpx
 from pydantic import BaseModel, Field, ValidationError
 
-from app.agent_runtime import ChatRagRuntime, RagContextBundle, TavilySearchClient, ToolCallRuntime
+from app.agent_runtime import (
+    ChatRagRuntime,
+    RagContextBundle,
+    TavilySearchClient,
+    ToolCallRuntime,
+    _merge_summary_locally,
+)
 from app.quota import DailyQuotaLimiter, QuotaStatus
 from app.repositories import (
     UNSET,
@@ -41,6 +47,18 @@ from app.repositories import (
     StoredMessage,
     StoredModelEndpoint,
     StoredSessionSummary,
+    StoredStoryCheckpoint,
+    StoredStoryEntry,
+    StoredStoryFact,
+    StoredStoryLorebook,
+    StoredStoryProject,
+    StoredStorySession,
+    StoredStoryAction,
+    StoryCheckpointNotFoundError,
+    StoryLorebookNotFoundError,
+    StoryProjectNotFoundError,
+    StoryRepository,
+    StorySessionNotFoundError,
 )
 
 
@@ -62,6 +80,9 @@ GENERATION_TASK_TYPES: tuple[str, ...] = (
     "plan_dispatch",
     "character_card_generate",
     "lorebook_generate",
+    "story_blueprint_generate",
+    "story_lorebook_generate",
+    "story_continuity_review",
     "illustration_prompt_generate",
     "audio_plan_generate",
     "result_review",
@@ -3144,7 +3165,11 @@ class ModelEndpointService:
 
 
 class GenerationService:
-    _PIPELINE_VERSION = "v0.1"
+    _PIPELINE_VERSION = "v0.2"
+    _PIPELINE_ROLEPLAY = "roleplay_character"
+    _PIPELINE_STORY = "story_project"
+    _APPLY_DRAFT_ONLY = "draft_only"
+    _APPLY_DIRECT = "direct_apply"
 
     def __init__(
         self,
@@ -3152,38 +3177,75 @@ class GenerationService:
         wizard_service: WizardService,
         model_endpoint_service: ModelEndpointService,
         app_settings_service: "AppSettingsService | None" = None,
+        story_service: "StoryService | None" = None,
     ) -> None:
         self._generation_repository = generation_repository
         self._wizard_service = wizard_service
         self._model_endpoint_service = model_endpoint_service
         self._app_settings_service = app_settings_service
+        self._story_service = story_service
 
     def create_job(
         self,
         *,
         user_input: str,
+        pipeline_type: str = _PIPELINE_ROLEPLAY,
+        apply_mode: str = _APPLY_DRAFT_ONLY,
+        story_project_id: str | None = None,
+        story_draft_payload: dict[str, object] | None = None,
     ) -> GenerationJobPublic:
         normalized_input = user_input.strip()
         if not normalized_input:
             raise ValueError("user_input cannot be empty")
+        normalized_pipeline = self._normalize_pipeline_type(pipeline_type)
+        normalized_apply_mode = self._normalize_apply_mode(apply_mode)
+        normalized_story_project_id = self._normalize_story_project_id(
+            story_project_id=story_project_id,
+            pipeline_type=normalized_pipeline,
+            apply_mode=normalized_apply_mode,
+        )
 
         job = self._generation_repository.create_job(
             user_input=normalized_input,
             pipeline_version=self._PIPELINE_VERSION,
         )
         self._append_event(job.job_id, "job_created", {"status": job.status})
+        self._append_event(
+            job.job_id,
+            "job_configured",
+            {
+                "pipeline_type": normalized_pipeline,
+                "apply_mode": normalized_apply_mode,
+                "story_project_id": normalized_story_project_id,
+                "story_draft_payload_present": story_draft_payload is not None,
+            },
+        )
         return self.get_job(job.job_id)
 
     def submit_job(
         self,
         *,
         user_input: str,
+        pipeline_type: str = _PIPELINE_ROLEPLAY,
+        apply_mode: str = _APPLY_DRAFT_ONLY,
+        story_project_id: str | None = None,
+        story_draft_payload: dict[str, object] | None = None,
         include_illustration_prompt: bool = True,
         include_audio_plan: bool = False,
     ) -> GenerationJobPublic:
-        job = self.create_job(user_input=user_input)
+        job = self.create_job(
+            user_input=user_input,
+            pipeline_type=pipeline_type,
+            apply_mode=apply_mode,
+            story_project_id=story_project_id,
+            story_draft_payload=story_draft_payload,
+        )
         return self.execute_job(
             job.job_id,
+            pipeline_type=pipeline_type,
+            apply_mode=apply_mode,
+            story_project_id=story_project_id,
+            story_draft_payload=story_draft_payload,
             include_illustration_prompt=include_illustration_prompt,
             include_audio_plan=include_audio_plan,
         )
@@ -3192,16 +3254,42 @@ class GenerationService:
         self,
         *,
         user_input: str,
+        pipeline_type: str = _PIPELINE_ROLEPLAY,
+        apply_mode: str = _APPLY_DRAFT_ONLY,
+        story_project_id: str | None = None,
+        story_draft_payload: dict[str, object] | None = None,
         include_illustration_prompt: bool = True,
         include_audio_plan: bool = False,
-    ) -> tuple[GenerationJobPublic, bool, bool]:
-        job = self.create_job(user_input=user_input)
-        return job, include_illustration_prompt, include_audio_plan
+    ) -> tuple[GenerationJobPublic, str, str, str | None, dict[str, object] | None, bool, bool]:
+        job = self.create_job(
+            user_input=user_input,
+            pipeline_type=pipeline_type,
+            apply_mode=apply_mode,
+            story_project_id=story_project_id,
+            story_draft_payload=story_draft_payload,
+        )
+        return (
+            job,
+            self._normalize_pipeline_type(pipeline_type),
+            self._normalize_apply_mode(apply_mode),
+            self._normalize_story_project_id(
+                story_project_id=story_project_id,
+                pipeline_type=self._normalize_pipeline_type(pipeline_type),
+                apply_mode=self._normalize_apply_mode(apply_mode),
+            ),
+            story_draft_payload,
+            include_illustration_prompt,
+            include_audio_plan,
+        )
 
     def execute_job(
         self,
         job_id: str,
         *,
+        pipeline_type: str = _PIPELINE_ROLEPLAY,
+        apply_mode: str = _APPLY_DRAFT_ONLY,
+        story_project_id: str | None = None,
+        story_draft_payload: dict[str, object] | None = None,
         include_illustration_prompt: bool = True,
         include_audio_plan: bool = False,
     ) -> GenerationJobPublic:
@@ -3223,20 +3311,86 @@ class GenerationService:
         self._append_event(job_id, "job_running", {})
 
         normalized_input = stored_job.user_input
+        normalized_pipeline = self._normalize_pipeline_type(pipeline_type)
+        normalized_apply_mode = self._normalize_apply_mode(apply_mode)
+        normalized_story_project_id = self._normalize_story_project_id(
+            story_project_id=story_project_id,
+            pipeline_type=normalized_pipeline,
+            apply_mode=normalized_apply_mode,
+        )
 
         try:
             self._assert_job_not_cancel_requested(job_id)
+            if story_draft_payload is not None:
+                if normalized_pipeline != self._PIPELINE_STORY:
+                    raise ValueError("story_draft_payload requires story_project pipeline")
+                if normalized_apply_mode != self._APPLY_DIRECT:
+                    raise ValueError("story_draft_payload requires direct_apply mode")
+                prepared = self._prepare_story_draft_payload(story_draft_payload)
+                apply_result = self._apply_story_generation_output(
+                    story_project_id=normalized_story_project_id,
+                    story_blueprint_output=prepared["story_blueprint"],
+                    story_lorebook_output=prepared["story_lorebook"],
+                )
+                self._create_artifact(job_id, "story_blueprint", prepared["story_blueprint"])
+                self._create_artifact(job_id, "story_lorebook", prepared["story_lorebook"])
+                if prepared["illustration_prompt"]:
+                    self._create_artifact(
+                        job_id,
+                        "illustration_prompt",
+                        prepared["illustration_prompt"],
+                    )
+                if prepared["audio_plan"]:
+                    self._create_artifact(job_id, "audio_plan", prepared["audio_plan"])
+                self._create_artifact(
+                    job_id,
+                    "story_continuity_review",
+                    prepared["story_continuity_review"],
+                )
+                self._create_artifact(
+                    job_id,
+                    "story_bundle",
+                    {
+                        "story_blueprint": prepared["story_blueprint"],
+                        "story_lorebook": prepared["story_lorebook"],
+                        "story_continuity_review": prepared["story_continuity_review"],
+                        "illustration_prompt": prepared["illustration_prompt"],
+                        "audio_plan": prepared["audio_plan"],
+                        "review": {
+                            "accepted": True,
+                            "missing": [],
+                            "source": "prepared_story_draft",
+                        },
+                        "apply_mode": normalized_apply_mode,
+                        "apply_result": apply_result,
+                    },
+                )
+                self._generation_repository.update_job(
+                    job_id,
+                    status="completed",
+                    error_message=None,
+                    completed_at=self._utcnow(),
+                )
+                self._append_event(
+                    job_id,
+                    "job_completed",
+                    {"accepted": True, "source": "prepared_story_draft"},
+                )
+                return self.get_job(job_id)
+
             intent_output = self._run_task(
                 job_id=job_id,
                 task_type="intent_parse",
                 prompt_payload={
                     "template": "intent_parse_v1",
+                    "pipeline_type": normalized_pipeline,
                     "input": normalized_input,
                 },
                 executor=lambda task_id: self._build_intent_output(
                     job_id=job_id,
                     task_id=task_id,
                     user_input=normalized_input,
+                    pipeline_type=normalized_pipeline,
                 ),
             )
             self._assert_job_not_cancel_requested(job_id)
@@ -3246,6 +3400,7 @@ class GenerationService:
                 task_type="plan_dispatch",
                 prompt_payload={
                     "template": "dispatch_plan_v1",
+                    "pipeline_type": normalized_pipeline,
                     "intent": intent_output,
                     "include_illustration_prompt": include_illustration_prompt,
                     "include_audio_plan": include_audio_plan,
@@ -3254,119 +3409,262 @@ class GenerationService:
                     job_id=job_id,
                     task_id=task_id,
                     intent_output=intent_output,
+                    pipeline_type=normalized_pipeline,
                     include_illustration_prompt=include_illustration_prompt,
                     include_audio_plan=include_audio_plan,
                 ),
             )
             self._assert_job_not_cancel_requested(job_id)
-
-            character_output = self._run_task(
-                job_id=job_id,
-                task_type="character_card_generate",
-                prompt_payload={
-                    "template": "character_card_v1",
-                    "intent": intent_output,
-                    "dispatch": dispatch_plan,
-                },
-                executor=lambda task_id: self._build_character_card_output(
+            if normalized_pipeline == self._PIPELINE_STORY:
+                story_blueprint_output = self._run_task(
                     job_id=job_id,
-                    task_id=task_id,
-                    user_input=normalized_input,
-                ),
-            )
-            self._assert_job_not_cancel_requested(job_id)
-
-            lorebook_output = self._run_task(
-                job_id=job_id,
-                task_type="lorebook_generate",
-                prompt_payload={
-                    "template": "lorebook_v1",
-                    "intent": intent_output,
-                    "character_name": character_output.get("name"),
-                },
-                executor=lambda task_id: self._build_lorebook_output(
-                    job_id=job_id,
-                    task_id=task_id,
-                    user_input=normalized_input,
-                    character_name=str(character_output.get("name", "Character")),
-                ),
-            )
-            self._assert_job_not_cancel_requested(job_id)
-
-            illustration_output: dict[str, object] = {}
-            if include_illustration_prompt:
-                illustration_output = self._run_task(
-                    job_id=job_id,
-                    task_type="illustration_prompt_generate",
+                    task_type="story_blueprint_generate",
                     prompt_payload={
-                        "template": "illustration_prompt_v1",
+                        "template": "story_blueprint_v1",
                         "intent": intent_output,
-                        "character": character_output,
-                        "lorebook": lorebook_output,
+                        "dispatch": dispatch_plan,
                     },
-                    executor=lambda task_id: self._build_illustration_prompt_output(
+                    executor=lambda task_id: self._build_story_blueprint_output(
                         job_id=job_id,
                         task_id=task_id,
                         user_input=normalized_input,
-                        character=character_output,
                     ),
                 )
                 self._assert_job_not_cancel_requested(job_id)
 
-            audio_output: dict[str, object] = {}
-            if include_audio_plan:
-                audio_output = self._run_task(
+                story_lorebook_output = self._run_task(
                     job_id=job_id,
-                    task_type="audio_plan_generate",
+                    task_type="story_lorebook_generate",
                     prompt_payload={
-                        "template": "audio_plan_v1",
+                        "template": "story_lorebook_v1",
                         "intent": intent_output,
-                        "character": character_output,
+                        "story_blueprint": story_blueprint_output,
                     },
-                    executor=lambda _task_id: self._build_audio_plan_output(character_output),
+                    executor=lambda task_id: self._build_story_lorebook_output(
+                        job_id=job_id,
+                        task_id=task_id,
+                        user_input=normalized_input,
+                        story_blueprint=story_blueprint_output,
+                    ),
                 )
                 self._assert_job_not_cancel_requested(job_id)
 
-            review_output = self._run_task(
-                job_id=job_id,
-                task_type="result_review",
-                prompt_payload={
-                    "template": "review_v1",
-                    "intent": intent_output,
-                },
-                executor=lambda task_id: self._build_review_output(
+                illustration_output: dict[str, object] = {}
+                if include_illustration_prompt:
+                    illustration_output = self._run_task(
+                        job_id=job_id,
+                        task_type="illustration_prompt_generate",
+                        prompt_payload={
+                            "template": "story_illustration_prompt_v1",
+                            "intent": intent_output,
+                            "story_blueprint": story_blueprint_output,
+                            "story_lorebook": story_lorebook_output,
+                        },
+                        executor=lambda task_id: self._build_story_illustration_prompt_output(
+                            job_id=job_id,
+                            task_id=task_id,
+                            user_input=normalized_input,
+                            story_blueprint=story_blueprint_output,
+                        ),
+                    )
+                    self._assert_job_not_cancel_requested(job_id)
+
+                audio_output: dict[str, object] = {}
+                if include_audio_plan:
+                    audio_output = self._run_task(
+                        job_id=job_id,
+                        task_type="audio_plan_generate",
+                        prompt_payload={
+                            "template": "story_audio_plan_v1",
+                            "intent": intent_output,
+                            "story_blueprint": story_blueprint_output,
+                        },
+                        executor=lambda _task_id: self._build_story_audio_plan_output(
+                            story_blueprint_output
+                        ),
+                    )
+                    self._assert_job_not_cancel_requested(job_id)
+
+                continuity_output = self._run_task(
                     job_id=job_id,
-                    task_id=task_id,
-                    intent_output=intent_output,
-                    character_output=character_output,
-                    lorebook_output=lorebook_output,
-                    illustration_output=illustration_output,
-                    audio_output=audio_output,
-                ),
-            )
-            self._assert_job_not_cancel_requested(job_id)
-
-            self._create_artifact(job_id, "intent", intent_output)
-            self._create_artifact(job_id, "dispatch_plan", dispatch_plan)
-            self._create_artifact(job_id, "character_card", character_output)
-            self._create_artifact(job_id, "lorebook", lorebook_output)
-            if include_illustration_prompt:
-                self._create_artifact(
-                    job_id,
-                    "illustration_prompt",
-                    illustration_output,
+                    task_type="story_continuity_review",
+                    prompt_payload={
+                        "template": "story_continuity_review_v1",
+                        "intent": intent_output,
+                        "story_blueprint": story_blueprint_output,
+                        "story_lorebook": story_lorebook_output,
+                    },
+                    executor=lambda task_id: self._build_story_continuity_review_output(
+                        job_id=job_id,
+                        task_id=task_id,
+                        intent_output=intent_output,
+                        story_blueprint_output=story_blueprint_output,
+                        story_lorebook_output=story_lorebook_output,
+                    ),
                 )
-            if include_audio_plan:
-                self._create_artifact(job_id, "audio_plan", audio_output)
+                self._assert_job_not_cancel_requested(job_id)
 
-            bundle_payload = {
-                "character_card": character_output,
-                "lorebook": lorebook_output,
-                "illustration_prompt": illustration_output,
-                "audio_plan": audio_output,
-                "review": review_output,
-            }
-            self._create_artifact(job_id, "bundle", bundle_payload)
+                review_output = self._run_task(
+                    job_id=job_id,
+                    task_type="result_review",
+                    prompt_payload={
+                        "template": "story_review_v1",
+                        "intent": intent_output,
+                    },
+                    executor=lambda task_id: self._build_story_review_output(
+                        job_id=job_id,
+                        task_id=task_id,
+                        intent_output=intent_output,
+                        story_blueprint_output=story_blueprint_output,
+                        story_lorebook_output=story_lorebook_output,
+                        continuity_output=continuity_output,
+                        illustration_output=illustration_output,
+                        audio_output=audio_output,
+                    ),
+                )
+                self._assert_job_not_cancel_requested(job_id)
+
+                apply_result: dict[str, object] = {}
+                if normalized_apply_mode == self._APPLY_DIRECT:
+                    if not bool(continuity_output.get("accepted", False)):
+                        raise ValueError(
+                            "story_continuity_review rejected direct_apply"
+                        )
+                    apply_result = self._apply_story_generation_output(
+                        story_project_id=normalized_story_project_id,
+                        story_blueprint_output=story_blueprint_output,
+                        story_lorebook_output=story_lorebook_output,
+                    )
+
+                self._create_artifact(job_id, "intent", intent_output)
+                self._create_artifact(job_id, "dispatch_plan", dispatch_plan)
+                self._create_artifact(job_id, "story_blueprint", story_blueprint_output)
+                self._create_artifact(job_id, "story_lorebook", story_lorebook_output)
+                if include_illustration_prompt:
+                    self._create_artifact(job_id, "illustration_prompt", illustration_output)
+                if include_audio_plan:
+                    self._create_artifact(job_id, "audio_plan", audio_output)
+                self._create_artifact(job_id, "story_continuity_review", continuity_output)
+
+                story_bundle_payload = {
+                    "story_blueprint": story_blueprint_output,
+                    "story_lorebook": story_lorebook_output,
+                    "story_continuity_review": continuity_output,
+                    "illustration_prompt": illustration_output,
+                    "audio_plan": audio_output,
+                    "review": review_output,
+                    "apply_mode": normalized_apply_mode,
+                    "apply_result": apply_result,
+                }
+                self._create_artifact(job_id, "story_bundle", story_bundle_payload)
+            else:
+                character_output = self._run_task(
+                    job_id=job_id,
+                    task_type="character_card_generate",
+                    prompt_payload={
+                        "template": "character_card_v1",
+                        "intent": intent_output,
+                        "dispatch": dispatch_plan,
+                    },
+                    executor=lambda task_id: self._build_character_card_output(
+                        job_id=job_id,
+                        task_id=task_id,
+                        user_input=normalized_input,
+                    ),
+                )
+                self._assert_job_not_cancel_requested(job_id)
+
+                lorebook_output = self._run_task(
+                    job_id=job_id,
+                    task_type="lorebook_generate",
+                    prompt_payload={
+                        "template": "lorebook_v1",
+                        "intent": intent_output,
+                        "character_name": character_output.get("name"),
+                    },
+                    executor=lambda task_id: self._build_lorebook_output(
+                        job_id=job_id,
+                        task_id=task_id,
+                        user_input=normalized_input,
+                        character_name=str(character_output.get("name", "Character")),
+                    ),
+                )
+                self._assert_job_not_cancel_requested(job_id)
+
+                illustration_output = {}
+                if include_illustration_prompt:
+                    illustration_output = self._run_task(
+                        job_id=job_id,
+                        task_type="illustration_prompt_generate",
+                        prompt_payload={
+                            "template": "illustration_prompt_v1",
+                            "intent": intent_output,
+                            "character": character_output,
+                            "lorebook": lorebook_output,
+                        },
+                        executor=lambda task_id: self._build_illustration_prompt_output(
+                            job_id=job_id,
+                            task_id=task_id,
+                            user_input=normalized_input,
+                            character=character_output,
+                        ),
+                    )
+                    self._assert_job_not_cancel_requested(job_id)
+
+                audio_output = {}
+                if include_audio_plan:
+                    audio_output = self._run_task(
+                        job_id=job_id,
+                        task_type="audio_plan_generate",
+                        prompt_payload={
+                            "template": "audio_plan_v1",
+                            "intent": intent_output,
+                            "character": character_output,
+                        },
+                        executor=lambda _task_id: self._build_audio_plan_output(character_output),
+                    )
+                    self._assert_job_not_cancel_requested(job_id)
+
+                review_output = self._run_task(
+                    job_id=job_id,
+                    task_type="result_review",
+                    prompt_payload={
+                        "template": "review_v1",
+                        "intent": intent_output,
+                    },
+                    executor=lambda task_id: self._build_review_output(
+                        job_id=job_id,
+                        task_id=task_id,
+                        intent_output=intent_output,
+                        character_output=character_output,
+                        lorebook_output=lorebook_output,
+                        illustration_output=illustration_output,
+                        audio_output=audio_output,
+                    ),
+                )
+                self._assert_job_not_cancel_requested(job_id)
+
+                self._create_artifact(job_id, "intent", intent_output)
+                self._create_artifact(job_id, "dispatch_plan", dispatch_plan)
+                self._create_artifact(job_id, "character_card", character_output)
+                self._create_artifact(job_id, "lorebook", lorebook_output)
+                if include_illustration_prompt:
+                    self._create_artifact(
+                        job_id,
+                        "illustration_prompt",
+                        illustration_output,
+                    )
+                if include_audio_plan:
+                    self._create_artifact(job_id, "audio_plan", audio_output)
+
+                bundle_payload = {
+                    "character_card": character_output,
+                    "lorebook": lorebook_output,
+                    "illustration_prompt": illustration_output,
+                    "audio_plan": audio_output,
+                    "review": review_output,
+                }
+                self._create_artifact(job_id, "bundle", bundle_payload)
 
             self._generation_repository.update_job(
                 job_id,
@@ -3413,16 +3711,45 @@ class GenerationService:
         source_job_id: str,
         *,
         user_input: str | None = None,
+        pipeline_type: str | None = None,
+        apply_mode: str | None = None,
+        story_project_id: str | None = None,
         include_illustration_prompt: bool | None = None,
         include_audio_plan: bool | None = None,
-    ) -> tuple[str, bool, bool]:
+    ) -> tuple[str, str, str, str | None, bool, bool]:
         source = self._generation_repository.get_job(source_job_id)
         next_input = source.user_input if user_input is None else user_input.strip()
         if not next_input:
             raise ValueError("user_input cannot be empty")
 
+        source_config = self._resolve_source_job_config(source_job_id)
+        next_pipeline_type = self._normalize_pipeline_type(
+            source_config.get("pipeline_type", self._PIPELINE_ROLEPLAY)
+            if pipeline_type is None
+            else pipeline_type
+        )
+        next_apply_mode = self._normalize_apply_mode(
+            source_config.get("apply_mode", self._APPLY_DRAFT_ONLY)
+            if apply_mode is None
+            else apply_mode
+        )
+        next_story_project_id = self._normalize_story_project_id(
+            story_project_id=(
+                source_config.get("story_project_id") if story_project_id is None else story_project_id
+            ),
+            pipeline_type=next_pipeline_type,
+            apply_mode=next_apply_mode,
+        )
+
         if include_illustration_prompt is not None and include_audio_plan is not None:
-            return next_input, include_illustration_prompt, include_audio_plan
+            return (
+                next_input,
+                next_pipeline_type,
+                next_apply_mode,
+                next_story_project_id,
+                include_illustration_prompt,
+                include_audio_plan,
+            )
 
         tasks = self._generation_repository.list_tasks(job_id=source_job_id)
         inferred_illustration = any(
@@ -3432,9 +3759,185 @@ class GenerationService:
 
         return (
             next_input,
+            next_pipeline_type,
+            next_apply_mode,
+            next_story_project_id,
             inferred_illustration if include_illustration_prompt is None else include_illustration_prompt,
             inferred_audio if include_audio_plan is None else include_audio_plan,
         )
+
+    def _normalize_pipeline_type(self, pipeline_type: str) -> str:
+        normalized = str(pipeline_type or "").strip().lower()
+        if not normalized:
+            normalized = self._PIPELINE_ROLEPLAY
+        if normalized not in {self._PIPELINE_ROLEPLAY, self._PIPELINE_STORY}:
+            raise ValueError(
+                "pipeline_type must be one of: roleplay_character, story_project"
+            )
+        return normalized
+
+    def _normalize_apply_mode(self, apply_mode: str) -> str:
+        normalized = str(apply_mode or "").strip().lower()
+        if not normalized:
+            normalized = self._APPLY_DRAFT_ONLY
+        if normalized not in {self._APPLY_DRAFT_ONLY, self._APPLY_DIRECT}:
+            raise ValueError("apply_mode must be one of: draft_only, direct_apply")
+        return normalized
+
+    def _normalize_story_project_id(
+        self,
+        *,
+        story_project_id: str | None,
+        pipeline_type: str,
+        apply_mode: str,
+    ) -> str | None:
+        normalized = None if story_project_id is None else story_project_id.strip()
+        if pipeline_type != self._PIPELINE_STORY:
+            return None
+        if normalized == "":
+            normalized = None
+        if apply_mode == self._APPLY_DRAFT_ONLY:
+            return None
+        return normalized
+
+    def _resolve_source_job_config(self, source_job_id: str) -> dict[str, object]:
+        events = self._generation_repository.list_events(job_id=source_job_id)
+        for event in reversed(events):
+            if event.event_type != "job_configured":
+                continue
+            payload = self._from_json(event.payload_json)
+            if payload:
+                return payload
+        return {}
+
+    def _apply_story_generation_output(
+        self,
+        *,
+        story_project_id: str | None,
+        story_blueprint_output: dict[str, object],
+        story_lorebook_output: dict[str, object],
+    ) -> dict[str, object]:
+        if self._story_service is None:
+            raise RoutingConfigurationError("Story service is not configured.")
+
+        title = str(story_blueprint_output.get("title", "")).strip()
+        premise = str(story_blueprint_output.get("premise", "")).strip()
+        opening_scene = str(story_blueprint_output.get("opening_scene", "")).strip()
+        system_prompt = str(story_blueprint_output.get("system_prompt", "")).strip()
+        if not title or not premise:
+            raise ValueError("story blueprint is missing title or premise")
+
+        created = story_project_id is None
+        if created:
+            project = self._story_service.create_project(
+                title=title,
+                premise=premise,
+                opening_scene=opening_scene,
+                system_prompt=system_prompt,
+            )
+        else:
+            project = self._story_service.update_project(
+                story_project_id,
+                title=title,
+                premise=premise,
+                opening_scene=opening_scene,
+                system_prompt=system_prompt,
+            )
+
+        for existing in self._story_service.list_lorebooks(project_id=project.project_id):
+            self._story_service.delete_lorebook(existing.lorebook_id)
+
+        created_lorebooks: list[dict[str, object]] = []
+        entries_raw = story_lorebook_output.get("entries")
+        entries = entries_raw if isinstance(entries_raw, list) else []
+        for item in entries:
+            if not isinstance(item, dict):
+                continue
+            lorebook = self._story_service.create_lorebook(
+                project_id=project.project_id,
+                keyword=str(item.get("keyword", "")).strip(),
+                insert_text=str(item.get("insert_text", "")).strip(),
+                sort_order=int(item.get("sort_order", 100)),
+                enabled=True,
+            )
+            created_lorebooks.append(
+                {
+                    "lorebook_id": lorebook.lorebook_id,
+                    "keyword": lorebook.keyword,
+                    "sort_order": lorebook.sort_order,
+                }
+            )
+
+        return {
+            "project_id": project.project_id,
+            "created": created,
+            "title": project.title,
+            "replaced_lorebook_count": len(created_lorebooks),
+            "lorebooks": created_lorebooks,
+        }
+
+    def _prepare_story_draft_payload(
+        self,
+        payload: dict[str, object],
+    ) -> dict[str, dict[str, object]]:
+        if not isinstance(payload, dict):
+            raise ValueError("story_draft_payload must be an object")
+
+        blueprint_raw = payload.get("story_blueprint") or payload.get("blueprint")
+        lorebook_raw = payload.get("story_lorebook") or payload.get("lorebook")
+        illustration_raw = payload.get("illustration_prompt") or {}
+        audio_raw = payload.get("audio_plan") or {}
+
+        if not isinstance(blueprint_raw, dict):
+            raise ValueError("story_draft_payload.story_blueprint must be an object")
+        if not isinstance(lorebook_raw, dict):
+            raise ValueError("story_draft_payload.story_lorebook must be an object")
+
+        story_blueprint = self._validate_story_blueprint_output(blueprint_raw)
+        story_lorebook = self._validate_story_lorebook_output(lorebook_raw)
+
+        illustration_prompt: dict[str, object] = {}
+        if isinstance(illustration_raw, dict) and str(illustration_raw.get("prompt", "")).strip():
+            illustration_prompt = self._validate_illustration_prompt_output(illustration_raw)
+        elif isinstance(illustration_raw, str) and illustration_raw.strip():
+            illustration_prompt = self._validate_illustration_prompt_output(
+                {"prompt": illustration_raw.strip()}
+            )
+
+        audio_plan: dict[str, object] = {}
+        if isinstance(audio_raw, dict):
+            audio_plan = {
+                str(key)[:80]: value
+                for key, value in audio_raw.items()
+                if str(key).strip()
+            }
+        elif isinstance(audio_raw, str) and audio_raw.strip():
+            audio_plan = {
+                "voice_style": "narrative",
+                "tone": "edited draft",
+                "sample_line": audio_raw.strip()[:500],
+            }
+
+        continuity = self._build_story_continuity_review_output_local(
+            story_blueprint_output=story_blueprint,
+            story_lorebook_output=story_lorebook,
+        )
+        continuity["source"] = "local_validation"
+        risks_raw = continuity.get("risks", [])
+        risks = risks_raw if isinstance(risks_raw, list) else []
+        if "edited_draft_without_model_review" not in risks:
+            risks.append("edited_draft_without_model_review")
+        continuity["risks"] = risks
+        if not bool(continuity.get("accepted", False)):
+            raise ValueError("edited story draft failed local continuity validation")
+
+        return {
+            "story_blueprint": story_blueprint,
+            "story_lorebook": story_lorebook,
+            "story_continuity_review": self._validate_story_continuity_review_output(continuity),
+            "illustration_prompt": illustration_prompt,
+            "audio_plan": audio_plan,
+        }
 
     def get_job(self, job_id: str) -> GenerationJobPublic:
         stored = self._generation_repository.get_job(job_id)
@@ -3614,21 +4117,26 @@ class GenerationService:
         job_id: str,
         task_id: str,
         user_input: str,
+        pipeline_type: str,
     ) -> dict[str, object]:
-        fallback = lambda: self._build_intent_output_local(user_input)
+        fallback = lambda: self._build_intent_output_local(
+            user_input=user_input,
+            pipeline_type=pipeline_type,
+        )
         messages = [
             {
                 "role": "system",
                 "content": (
-                    "You are a planner for a roleplay asset pipeline. "
+                    "You are a planner for an AI narrative generation pipeline. "
                     "Return strict JSON with keys: summary, requirements, constraints. "
-                    "requirements must include booleans: character_card, lorebook, illustration_prompt, audio_plan."
+                    "requirements must include booleans: character_card, lorebook, story_blueprint, story_lorebook, illustration_prompt, audio_plan."
                 ),
             },
             {
                 "role": "user",
                 "content": (
                     "Analyze this user requirement and decide required tasks.\n"
+                    f"Pipeline type: {pipeline_type}\n"
                     f"Requirement: {user_input}\n"
                     "Return JSON only."
                 ),
@@ -3643,19 +4151,27 @@ class GenerationService:
             fallback_builder=fallback,
         )
 
-    def _build_intent_output_local(self, user_input: str) -> dict[str, object]:
+    def _build_intent_output_local(
+        self,
+        *,
+        user_input: str,
+        pipeline_type: str,
+    ) -> dict[str, object]:
         include_illustration = any(
             token in user_input.lower()
-            for token in ["插图", "立绘", "image", "illustration", "头像"]
+            for token in ["???", "???", "image", "illustration", "???"]
         )
         include_audio = any(
-            token in user_input.lower() for token in ["语音", "音频", "tts", "voice"]
+            token in user_input.lower() for token in ["???", "???", "tts", "voice"]
         )
+        is_story = pipeline_type == self._PIPELINE_STORY
         return {
             "summary": user_input[:300],
             "requirements": {
-                "character_card": True,
-                "lorebook": True,
+                "character_card": not is_story,
+                "lorebook": not is_story,
+                "story_blueprint": is_story,
+                "story_lorebook": is_story,
                 "illustration_prompt": include_illustration,
                 "audio_plan": include_audio,
             },
@@ -3672,6 +4188,8 @@ class GenerationService:
         requirements = {
             "character_card": bool(requirements_obj.get("character_card", True)),
             "lorebook": bool(requirements_obj.get("lorebook", True)),
+            "story_blueprint": bool(requirements_obj.get("story_blueprint", False)),
+            "story_lorebook": bool(requirements_obj.get("story_lorebook", False)),
             "illustration_prompt": bool(requirements_obj.get("illustration_prompt", False)),
             "audio_plan": bool(requirements_obj.get("audio_plan", False)),
         }
@@ -3696,11 +4214,13 @@ class GenerationService:
         job_id: str,
         task_id: str,
         intent_output: dict[str, object],
+        pipeline_type: str,
         include_illustration_prompt: bool,
         include_audio_plan: bool,
     ) -> dict[str, object]:
         fallback = lambda: self._build_dispatch_plan_local(
             intent_output=intent_output,
+            pipeline_type=pipeline_type,
             include_illustration_prompt=include_illustration_prompt,
             include_audio_plan=include_audio_plan,
         )
@@ -3708,15 +4228,16 @@ class GenerationService:
             {
                 "role": "system",
                 "content": (
-                    "You dispatch generation tasks for a roleplay pipeline. "
+                    "You dispatch generation tasks for an AI narrative pipeline. "
                     "Return strict JSON with keys: tasks, strategy. "
                     "tasks is an ordered array of task names from this set: "
-                    "character_card_generate, lorebook_generate, illustration_prompt_generate, audio_plan_generate, result_review."
+                    "character_card_generate, lorebook_generate, story_blueprint_generate, story_lorebook_generate, story_continuity_review, illustration_prompt_generate, audio_plan_generate, result_review."
                 ),
             },
             {
                 "role": "user",
                 "content": (
+                    f"Pipeline type: {pipeline_type}\n"
                     f"Intent JSON: {self._to_json(intent_output)}\n"
                     f"include_illustration_prompt={include_illustration_prompt}\n"
                     f"include_audio_plan={include_audio_plan}\n"
@@ -3729,7 +4250,10 @@ class GenerationService:
             task_id=task_id,
             task_type="plan_dispatch",
             messages=messages,
-            validator=self._validate_dispatch_plan_output,
+            validator=lambda payload: self._validate_dispatch_plan_output(
+                payload,
+                pipeline_type=pipeline_type,
+            ),
             fallback_builder=fallback,
         )
 
@@ -3737,22 +4261,43 @@ class GenerationService:
         self,
         *,
         intent_output: dict[str, object],
+        pipeline_type: str,
         include_illustration_prompt: bool,
         include_audio_plan: bool,
     ) -> dict[str, object]:
         requirements = intent_output.get("requirements")
         req_obj = requirements if isinstance(requirements, dict) else {}
-        tasks = ["character_card_generate", "lorebook_generate", "result_review"]
-        if bool(req_obj.get("illustration_prompt")) or include_illustration_prompt:
-            tasks.insert(2, "illustration_prompt_generate")
-        if bool(req_obj.get("audio_plan")) or include_audio_plan:
-            tasks.insert(3, "audio_plan_generate")
+        if pipeline_type == self._PIPELINE_STORY:
+            tasks = [
+                "story_blueprint_generate",
+                "story_lorebook_generate",
+                "story_continuity_review",
+                "result_review",
+            ]
+            if bool(req_obj.get("illustration_prompt")) or include_illustration_prompt:
+                tasks.insert(2, "illustration_prompt_generate")
+            if bool(req_obj.get("audio_plan")) or include_audio_plan:
+                tasks.insert(3 if "illustration_prompt_generate" in tasks else 2, "audio_plan_generate")
+        else:
+            tasks = ["character_card_generate", "lorebook_generate", "result_review"]
+            if bool(req_obj.get("illustration_prompt")) or include_illustration_prompt:
+                tasks.insert(2, "illustration_prompt_generate")
+            if bool(req_obj.get("audio_plan")) or include_audio_plan:
+                tasks.insert(3, "audio_plan_generate")
         return {"tasks": tasks, "strategy": "parallelizable-after-intent"}
 
-    def _validate_dispatch_plan_output(self, payload: dict[str, object]) -> dict[str, object]:
+    def _validate_dispatch_plan_output(
+        self,
+        payload: dict[str, object],
+        *,
+        pipeline_type: str,
+    ) -> dict[str, object]:
         allowed = {
             "character_card_generate",
             "lorebook_generate",
+            "story_blueprint_generate",
+            "story_lorebook_generate",
+            "story_continuity_review",
             "illustration_prompt_generate",
             "audio_plan_generate",
             "result_review",
@@ -3764,11 +4309,21 @@ class GenerationService:
                 name = str(item).strip()
                 if name in allowed and name not in tasks:
                     tasks.append(name)
-        if "character_card_generate" not in tasks:
-            tasks.insert(0, "character_card_generate")
-        if "lorebook_generate" not in tasks:
-            insert_at = 1 if len(tasks) >= 1 else 0
-            tasks.insert(insert_at, "lorebook_generate")
+        if pipeline_type == self._PIPELINE_STORY:
+            if "story_blueprint_generate" not in tasks:
+                tasks.insert(0, "story_blueprint_generate")
+            if "story_lorebook_generate" not in tasks:
+                insert_at = 1 if len(tasks) >= 1 else 0
+                tasks.insert(insert_at, "story_lorebook_generate")
+            if "story_continuity_review" not in tasks:
+                insert_at = len(tasks) if "result_review" not in tasks else max(0, len(tasks) - 1)
+                tasks.insert(insert_at, "story_continuity_review")
+        else:
+            if "character_card_generate" not in tasks:
+                tasks.insert(0, "character_card_generate")
+            if "lorebook_generate" not in tasks:
+                insert_at = 1 if len(tasks) >= 1 else 0
+                tasks.insert(insert_at, "lorebook_generate")
         if "result_review" not in tasks:
             tasks.append("result_review")
         strategy = str(payload.get("strategy") or "parallelizable-after-intent").strip()
@@ -3910,6 +4465,264 @@ class GenerationService:
             )
         return {"entries": entries}
 
+    def _build_story_blueprint_output(
+        self,
+        *,
+        job_id: str,
+        task_id: str,
+        user_input: str,
+    ) -> dict[str, object]:
+        fallback = lambda: self._build_story_blueprint_output_local(user_input=user_input)
+        messages = [
+            {
+                "role": "system",
+                "content": (
+                    "Generate an interactive fiction story blueprint. "
+                    "Return strict JSON with keys: title, premise, opening_scene, system_prompt, chapters_outline, tone, protagonist_profile."
+                ),
+            },
+            {
+                "role": "user",
+                "content": (
+                    "Create a story blueprint from this requirement:\n"
+                    f"{user_input}\n\n"
+                    "Output JSON only."
+                ),
+            },
+        ]
+        return self._execute_model_or_fallback(
+            job_id=job_id,
+            task_id=task_id,
+            task_type="story_blueprint_generate",
+            messages=messages,
+            validator=self._validate_story_blueprint_output,
+            fallback_builder=fallback,
+        )
+
+    def _build_story_blueprint_output_local(
+        self,
+        *,
+        user_input: str,
+    ) -> dict[str, object]:
+        text = user_input.strip()
+        tokens = [
+            token.strip(" ,.!?;:\"'()[]{}")
+            for token in text.split()
+            if token.strip(" ,.!?;:\"'()[]{}")
+        ]
+        title = "Untitled Story Project"
+        if tokens:
+            title = " ".join(tokens[:5])[:120]
+        premise = text[:1200] or "An unfolding interactive fiction story."
+        opening_scene = (
+            f"The story begins in motion: {text[:280]}" if text else "The story begins with a tense, unresolved opening scene."
+        )
+        return {
+            "title": title,
+            "premise": premise,
+            "opening_scene": opening_scene[:4000],
+            "system_prompt": "Narrate with immersive detail, preserve continuity, and let player choices redirect the scene.",
+            "chapters_outline": [
+                "Chapter 1: Establish the setting, the immediate tension, and the player's role.",
+                "Chapter 2: Reveal a complication that deepens the mystery or conflict.",
+                "Chapter 3: Force a consequential decision that changes the direction of the story.",
+            ],
+            "tone": "immersive dramatic fiction",
+            "protagonist_profile": text[:600] or "A capable protagonist entering a volatile situation.",
+        }
+
+    def _build_story_lorebook_output(
+        self,
+        *,
+        job_id: str,
+        task_id: str,
+        user_input: str,
+        story_blueprint: dict[str, object],
+    ) -> dict[str, object]:
+        fallback = lambda: self._build_story_lorebook_output_local(
+            user_input=user_input,
+            story_blueprint=story_blueprint,
+        )
+        messages = [
+            {
+                "role": "system",
+                "content": (
+                    "Generate lorebook entries for an interactive fiction project. "
+                    "Return strict JSON with key 'entries' as an array. "
+                    "Each entry must include keyword, insert_text, sort_order."
+                ),
+            },
+            {
+                "role": "user",
+                "content": (
+                    f"Requirement: {user_input}\n"
+                    f"Story blueprint JSON: {self._to_json(story_blueprint)}\n"
+                    "Return 3 to 6 concise lorebook entries in JSON only."
+                ),
+            },
+        ]
+        return self._execute_model_or_fallback(
+            job_id=job_id,
+            task_id=task_id,
+            task_type="story_lorebook_generate",
+            messages=messages,
+            validator=self._validate_story_lorebook_output,
+            fallback_builder=fallback,
+        )
+
+    def _build_story_lorebook_output_local(
+        self,
+        *,
+        user_input: str,
+        story_blueprint: dict[str, object],
+    ) -> dict[str, object]:
+        title = str(story_blueprint.get("title", "Story")).strip() or "Story"
+        keywords = self._extract_keywords(
+            f"{user_input} {story_blueprint.get('premise', '')} {story_blueprint.get('opening_scene', '')}"
+        )
+        entries: list[dict[str, object]] = []
+        for idx, keyword in enumerate(keywords[:5]):
+            entries.append(
+                {
+                    "keyword": keyword,
+                    "insert_text": f"{title} setting note about '{keyword}'. Keep the story consistent when this appears.",
+                    "sort_order": 100 + idx * 10,
+                }
+            )
+        if not entries:
+            entries.append(
+                {
+                    "keyword": "story-baseline",
+                    "insert_text": f"{title} baseline world rule. Preserve continuity and recurring tone.",
+                    "sort_order": 100,
+                }
+            )
+        return {"entries": entries}
+
+    def _build_story_illustration_prompt_output(
+        self,
+        *,
+        job_id: str,
+        task_id: str,
+        user_input: str,
+        story_blueprint: dict[str, object],
+    ) -> dict[str, object]:
+        fallback = lambda: self._build_story_illustration_prompt_output_local(
+            user_input=user_input,
+            story_blueprint=story_blueprint,
+        )
+        messages = [
+            {
+                "role": "system",
+                "content": (
+                    "Generate a high quality illustration prompt for an interactive fiction story cover or opening scene. "
+                    "Return strict JSON with keys: prompt, negative_prompt."
+                ),
+            },
+            {
+                "role": "user",
+                "content": (
+                    f"Requirement: {user_input}\n"
+                    f"Story blueprint JSON: {self._to_json(story_blueprint)}\n"
+                    "Return JSON only."
+                ),
+            },
+        ]
+        return self._execute_model_or_fallback(
+            job_id=job_id,
+            task_id=task_id,
+            task_type="illustration_prompt_generate",
+            messages=messages,
+            validator=self._validate_illustration_prompt_output,
+            fallback_builder=fallback,
+        )
+
+    def _build_story_illustration_prompt_output_local(
+        self,
+        *,
+        user_input: str,
+        story_blueprint: dict[str, object],
+    ) -> dict[str, object]:
+        title = str(story_blueprint.get("title", "Story")).strip() or "Story"
+        opening_scene = str(story_blueprint.get("opening_scene", "")).strip()
+        prompt = (
+            f"Cover or opening-scene illustration for {title}. "
+            f"Scene: {opening_scene[:260]}. "
+            f"Requirement: {user_input[:180]}. "
+            "Cinematic composition, atmospheric lighting, high detail, narrative focus."
+        )
+        return {
+            "prompt": prompt,
+            "negative_prompt": "lowres, blurry, distorted anatomy, extra limbs, text watermark, logo",
+        }
+
+    def _build_story_audio_plan_output(self, story_blueprint: dict[str, object]) -> dict[str, object]:
+        title = str(story_blueprint.get("title", "Story")).strip() or "Story"
+        tone = str(story_blueprint.get("tone", "immersive dramatic fiction")).strip() or "immersive dramatic fiction"
+        return {
+            "voice_style": "narrative_cinematic",
+            "tone": tone[:120],
+            "sample_line": f"{title}: the scene opens and the world begins to move around the player.",
+        }
+
+    def _build_story_continuity_review_output(
+        self,
+        *,
+        job_id: str,
+        task_id: str,
+        intent_output: dict[str, object],
+        story_blueprint_output: dict[str, object],
+        story_lorebook_output: dict[str, object],
+    ) -> dict[str, object]:
+        fallback = lambda: self._build_story_continuity_review_output_local(
+            story_blueprint_output=story_blueprint_output,
+            story_lorebook_output=story_lorebook_output,
+        )
+        messages = [
+            {
+                "role": "system",
+                "content": (
+                    "Review story generation outputs for continuity readiness. "
+                    "Return strict JSON with keys: accepted, missing, risks."
+                ),
+            },
+            {
+                "role": "user",
+                "content": (
+                    f"Intent JSON: {self._to_json(intent_output)}\n"
+                    f"Story blueprint JSON: {self._to_json(story_blueprint_output)}\n"
+                    f"Story lorebook JSON: {self._to_json(story_lorebook_output)}\n"
+                    "Return JSON only."
+                ),
+            },
+        ]
+        return self._execute_model_or_fallback(
+            job_id=job_id,
+            task_id=task_id,
+            task_type="story_continuity_review",
+            messages=messages,
+            validator=self._validate_story_continuity_review_output,
+            fallback_builder=fallback,
+        )
+
+    def _build_story_continuity_review_output_local(
+        self,
+        *,
+        story_blueprint_output: dict[str, object],
+        story_lorebook_output: dict[str, object],
+    ) -> dict[str, object]:
+        missing: list[str] = []
+        risks: list[str] = []
+        if not story_blueprint_output.get("title"):
+            missing.append("story_blueprint.title")
+        if not story_blueprint_output.get("opening_scene"):
+            missing.append("story_blueprint.opening_scene")
+        if not story_lorebook_output.get("entries"):
+            missing.append("story_lorebook.entries")
+        if len(str(story_blueprint_output.get("premise", "")).strip()) < 40:
+            risks.append("premise_too_short")
+        return {"accepted": len(missing) == 0, "missing": missing, "risks": risks}
+
     def _build_illustration_prompt_output(
         self,
         *,
@@ -4047,6 +4860,89 @@ class GenerationService:
             "accepted": len(missing) == 0,
             "missing": missing,
         }
+
+    def _build_story_review_output(
+        self,
+        *,
+        job_id: str,
+        task_id: str,
+        intent_output: dict[str, object],
+        story_blueprint_output: dict[str, object],
+        story_lorebook_output: dict[str, object],
+        continuity_output: dict[str, object],
+        illustration_output: dict[str, object],
+        audio_output: dict[str, object],
+    ) -> dict[str, object]:
+        fallback = lambda: self._build_story_review_output_local(
+            intent_output=intent_output,
+            story_blueprint_output=story_blueprint_output,
+            story_lorebook_output=story_lorebook_output,
+            continuity_output=continuity_output,
+            illustration_output=illustration_output,
+            audio_output=audio_output,
+        )
+        messages = [
+            {
+                "role": "system",
+                "content": (
+                    "You review story generation outputs against requirements. "
+                    "Return strict JSON with keys: accepted (bool), missing (array of string)."
+                ),
+            },
+            {
+                "role": "user",
+                "content": (
+                    f"Intent JSON: {self._to_json(intent_output)}\n"
+                    f"Story blueprint JSON: {self._to_json(story_blueprint_output)}\n"
+                    f"Story lorebook JSON: {self._to_json(story_lorebook_output)}\n"
+                    f"Continuity JSON: {self._to_json(continuity_output)}\n"
+                    f"Illustration JSON: {self._to_json(illustration_output)}\n"
+                    f"Audio JSON: {self._to_json(audio_output)}\n"
+                    "Review and return JSON only."
+                ),
+            },
+        ]
+        return self._execute_model_or_fallback(
+            job_id=job_id,
+            task_id=task_id,
+            task_type="result_review",
+            messages=messages,
+            validator=self._validate_story_review_output,
+            fallback_builder=fallback,
+        )
+
+    def _build_story_review_output_local(
+        self,
+        *,
+        intent_output: dict[str, object],
+        story_blueprint_output: dict[str, object],
+        story_lorebook_output: dict[str, object],
+        continuity_output: dict[str, object],
+        illustration_output: dict[str, object],
+        audio_output: dict[str, object],
+    ) -> dict[str, object]:
+        missing: list[str] = []
+        if not story_blueprint_output.get("title"):
+            missing.append("story_blueprint.title")
+        if not story_lorebook_output.get("entries"):
+            missing.append("story_lorebook.entries")
+        if not bool(continuity_output.get("accepted", False)):
+            missing.extend(str(item) for item in continuity_output.get("missing", []) if str(item).strip())
+        requirements = intent_output.get("requirements")
+        req_obj = requirements if isinstance(requirements, dict) else {}
+        if bool(req_obj.get("illustration_prompt")) and not illustration_output:
+            missing.append("illustration_prompt")
+        if bool(req_obj.get("audio_plan")) and not audio_output:
+            missing.append("audio_plan")
+        unique_missing = []
+        seen: set[str] = set()
+        for item in missing:
+            normalized = str(item).strip()
+            if not normalized or normalized in seen:
+                continue
+            seen.add(normalized)
+            unique_missing.append(normalized[:120])
+        return {"accepted": len(unique_missing) == 0, "missing": unique_missing}
 
     def _execute_model_or_fallback(
         self,
@@ -4229,6 +5125,78 @@ class GenerationService:
             raise ValueError("entries invalid")
         return {"entries": entries}
 
+    def _validate_story_blueprint_output(
+        self,
+        payload: dict[str, object],
+    ) -> dict[str, object]:
+        title = str(payload.get("title", "")).strip()
+        premise = str(payload.get("premise", "")).strip()
+        opening_scene = str(payload.get("opening_scene", "")).strip()
+        system_prompt = str(payload.get("system_prompt", "")).strip()
+        tone = str(payload.get("tone", "")).strip()
+        protagonist_profile = str(payload.get("protagonist_profile", "")).strip()
+        chapters_raw = payload.get("chapters_outline", [])
+        if not title:
+            raise ValueError("story_blueprint.title missing")
+        if not premise:
+            raise ValueError("story_blueprint.premise missing")
+        if not opening_scene:
+            raise ValueError("story_blueprint.opening_scene missing")
+        if not system_prompt:
+            system_prompt = "Maintain narrative continuity, immersive detail, and clear scene progression."
+        if not tone:
+            tone = "immersive dramatic fiction"
+        if not protagonist_profile:
+            protagonist_profile = "A capable protagonist with room to grow under pressure."
+        chapters: list[str] = []
+        if isinstance(chapters_raw, list):
+            for item in chapters_raw[:8]:
+                text = str(item).strip()
+                if text:
+                    chapters.append(text[:240])
+        if len(chapters) < 3:
+            raise ValueError("story_blueprint.chapters_outline must contain at least 3 items")
+        return {
+            "title": title[:120],
+            "premise": premise[:4000],
+            "opening_scene": opening_scene[:4000],
+            "system_prompt": system_prompt[:8000],
+            "chapters_outline": chapters,
+            "tone": tone[:200],
+            "protagonist_profile": protagonist_profile[:2000],
+        }
+
+    def _validate_story_lorebook_output(
+        self,
+        payload: dict[str, object],
+    ) -> dict[str, object]:
+        return self._validate_lorebook_output(payload)
+
+    def _validate_story_continuity_review_output(
+        self,
+        payload: dict[str, object],
+    ) -> dict[str, object]:
+        accepted = bool(payload.get("accepted", False))
+        missing_raw = payload.get("missing", [])
+        risks_raw = payload.get("risks", [])
+        missing = [
+            str(item).strip()[:120]
+            for item in (missing_raw if isinstance(missing_raw, list) else [])
+            if str(item).strip()
+        ][:20]
+        risks = [
+            str(item).strip()[:160]
+            for item in (risks_raw if isinstance(risks_raw, list) else [])
+            if str(item).strip()
+        ][:20]
+        return {"accepted": accepted, "missing": missing, "risks": risks}
+
+    def _validate_story_review_output(
+        self,
+        payload: dict[str, object],
+    ) -> dict[str, object]:
+        return self._validate_review_output(payload)
+
     def _validate_illustration_prompt_output(
         self,
         payload: dict[str, object],
@@ -4297,6 +5265,12 @@ class GenerationService:
             return ["deepseek", "qwen", "kimi", "openai", "openai_compatible"]
         if task_type == "lorebook_generate":
             return ["qwen", "deepseek", "kimi", "openai", "openai_compatible"]
+        if task_type == "story_blueprint_generate":
+            return ["deepseek", "kimi", "qwen", "openai", "openai_compatible"]
+        if task_type == "story_lorebook_generate":
+            return ["qwen", "deepseek", "kimi", "openai", "openai_compatible"]
+        if task_type == "story_continuity_review":
+            return ["kimi", "deepseek", "qwen", "openai", "openai_compatible"]
         if task_type == "illustration_prompt_generate":
             return ["kimi", "qwen", "deepseek", "openai", "openai_compatible"]
         if task_type == "audio_plan_generate":
@@ -4426,3 +5400,733 @@ class GenerationService:
         if isinstance(exc, ValueError):
             return "validation"
         return "internal"
+
+
+@dataclass(frozen=True)
+class StoryContextStats:
+    session_id: str
+    context_char_budget: int
+    summary_chars: int
+    fact_count: int
+    lorebook_hit_count: int
+    recent_entry_chars: int
+    recent_entry_count: int
+    checkpoint_count: int
+    updated_at: datetime
+
+
+@dataclass(frozen=True)
+class StoryContinueResult:
+    session_id: str
+    reply: str
+    checkpoint_id: str
+    entry_count: int
+    context_stats: StoryContextStats
+
+
+@dataclass(frozen=True)
+class StoryAigcActionPublic:
+    action_id: str
+    session_id: str
+    action_type: str
+    selected_text: str
+    result: dict[str, object]
+    created_at: datetime
+
+
+@dataclass(frozen=True)
+class StoryContextBundle:
+    messages: list[dict[str, object]]
+    stats: StoryContextStats
+
+
+class StoryService:
+    _CONTEXT_CHAR_BUDGET = 12000
+    _SUMMARY_MAX_CHARS = 2400
+    _CHECKPOINT_SUMMARY_MAX_CHARS = 1200
+    _LOREBOOK_TOTAL_MAX_CHARS = 2200
+    _FACTS_TOTAL_MAX_CHARS = 1800
+    _RECENT_TOTAL_MAX_CHARS = 4200
+
+    def __init__(
+        self,
+        story_repository: StoryRepository,
+        *,
+        app_settings_service: "AppSettingsService | None" = None,
+        model_endpoint_service: "ModelEndpointService | None" = None,
+        tool_runtime: ToolCallRuntime | None = None,
+    ) -> None:
+        self._story_repository = story_repository
+        self._app_settings_service = app_settings_service
+        self._model_endpoint_service = model_endpoint_service
+        self._tool_runtime = tool_runtime
+        self._context_stats_by_session: dict[str, StoryContextStats] = {}
+
+    def create_project(
+        self,
+        *,
+        title: str,
+        premise: str,
+        opening_scene: str = "",
+        system_prompt: str = "",
+    ) -> StoredStoryProject:
+        return self._story_repository.create_project(
+            title=title.strip(),
+            premise=premise.strip(),
+            opening_scene=opening_scene.strip(),
+            system_prompt=system_prompt.strip(),
+            status="active",
+        )
+
+    def list_projects(self, *, limit: int = 50, offset: int = 0) -> list[StoredStoryProject]:
+        return self._story_repository.list_projects(limit=limit, offset=offset)
+
+    def get_project(self, project_id: str) -> StoredStoryProject:
+        return self._story_repository.get_project(project_id)
+
+    def update_project(
+        self,
+        project_id: str,
+        *,
+        title: str | None = None,
+        premise: str | None = None,
+        opening_scene: str | None = None,
+        system_prompt: str | None = None,
+        status: str | None = None,
+    ) -> StoredStoryProject:
+        return self._story_repository.update_project(
+            project_id,
+            title=None if title is None else title.strip(),
+            premise=None if premise is None else premise.strip(),
+            opening_scene=None if opening_scene is None else opening_scene.strip(),
+            system_prompt=None if system_prompt is None else system_prompt.strip(),
+            status=None if status is None else status.strip(),
+        )
+
+    def delete_project(self, project_id: str) -> None:
+        sessions = self._story_repository.list_sessions(project_id=project_id, limit=200, offset=0)
+        self._story_repository.delete_project(project_id)
+        for session in sessions:
+            self._context_stats_by_session.pop(session.session_id, None)
+
+    def start_session(self, project_id: str) -> StoredStorySession:
+        project = self._story_repository.get_project(project_id)
+        session = self._story_repository.create_session(project_id=project_id)
+        opening_scene = project.opening_scene.strip()
+        if opening_scene:
+            entry = self._story_repository.append_entry(
+                session_id=session.session_id,
+                role="assistant",
+                content=opening_scene,
+                entry_type="scene",
+            )
+            facts = self._extract_story_facts([opening_scene])
+            self._story_repository.replace_facts(session_id=session.session_id, facts=facts)
+            checkpoint = self._story_repository.create_checkpoint(
+                session_id=session.session_id,
+                title="Opening",
+                summary_text=self._build_summary("", opening_scene),
+                current_scene=opening_scene,
+                facts_json=json.dumps(facts, ensure_ascii=False),
+                last_sequence=entry.sequence,
+            )
+            session = self._story_repository.update_session_state(
+                session.session_id,
+                current_summary=self._build_summary("", opening_scene),
+                current_scene=opening_scene,
+                active_checkpoint_id=checkpoint.checkpoint_id,
+            )
+        self._context_stats_by_session[session.session_id] = self._compute_context_stats(
+            session_id=session.session_id
+        )
+        return session
+
+    def list_sessions(
+        self,
+        *,
+        project_id: str | None = None,
+        limit: int = 50,
+        offset: int = 0,
+    ) -> list[StoredStorySession]:
+        return self._story_repository.list_sessions(
+            project_id=project_id,
+            limit=limit,
+            offset=offset,
+        )
+
+    def get_session(self, session_id: str) -> StoredStorySession:
+        return self._story_repository.get_session(session_id)
+
+    def get_history(self, session_id: str) -> list[StoredStoryEntry]:
+        return self._story_repository.get_history(session_id)
+
+    def list_facts(self, session_id: str) -> list[StoredStoryFact]:
+        return self._story_repository.list_facts(session_id)
+
+    def list_checkpoints(
+        self,
+        *,
+        session_id: str,
+        limit: int = 100,
+        offset: int = 0,
+        ) -> list[StoredStoryCheckpoint]:
+        return self._story_repository.list_checkpoints(
+            session_id=session_id,
+            limit=limit,
+            offset=offset,
+        )
+
+    def create_lorebook(
+        self,
+        *,
+        project_id: str,
+        keyword: str,
+        insert_text: str,
+        sort_order: int = 100,
+        enabled: bool = True,
+    ) -> StoredStoryLorebook:
+        if not keyword.strip():
+            raise ValueError("keyword cannot be empty")
+        if not insert_text.strip():
+            raise ValueError("insert_text cannot be empty")
+        return self._story_repository.create_lorebook(
+            project_id=project_id,
+            keyword=keyword.strip(),
+            insert_text=insert_text.strip(),
+            sort_order=sort_order,
+            enabled=enabled,
+        )
+
+    def list_lorebooks(
+        self,
+        *,
+        project_id: str,
+        enabled: bool | None = None,
+    ) -> list[StoredStoryLorebook]:
+        return self._story_repository.list_lorebooks(project_id=project_id, enabled=enabled)
+
+    def update_lorebook(
+        self,
+        lorebook_id: str,
+        *,
+        keyword: str | None = None,
+        insert_text: str | None = None,
+        sort_order: int | None = None,
+        enabled: bool | None = None,
+    ) -> StoredStoryLorebook:
+        normalized_keyword = None if keyword is None else keyword.strip()
+        normalized_insert = None if insert_text is None else insert_text.strip()
+        if normalized_keyword is not None and not normalized_keyword:
+            raise ValueError("keyword cannot be empty")
+        if normalized_insert is not None and not normalized_insert:
+            raise ValueError("insert_text cannot be empty")
+        return self._story_repository.update_lorebook(
+            lorebook_id,
+            keyword=normalized_keyword,
+            insert_text=normalized_insert,
+            sort_order=sort_order,
+            enabled=enabled,
+        )
+
+    def delete_lorebook(self, lorebook_id: str) -> None:
+        self._story_repository.delete_lorebook(lorebook_id)
+
+    def rollback_to_checkpoint(self, *, session_id: str, checkpoint_id: str) -> StoredStorySession:
+        session = self._story_repository.rollback_to_checkpoint(
+            session_id=session_id,
+            checkpoint_id=checkpoint_id,
+        )
+        self._context_stats_by_session[session_id] = self._compute_context_stats(session_id=session_id)
+        return session
+
+    def get_context_stats(self, session_id: str) -> StoryContextStats:
+        if session_id in self._context_stats_by_session:
+            return self._context_stats_by_session[session_id]
+        stats = self._compute_context_stats(session_id=session_id)
+        self._context_stats_by_session[session_id] = stats
+        return stats
+
+    def continue_story(self, *, session_id: str, message: str) -> StoryContinueResult:
+        cleaned = message.strip()
+        if not cleaned:
+            raise ValueError("message cannot be empty")
+
+        session = self._story_repository.get_session(session_id)
+        project = self._story_repository.get_project(session.project_id)
+        self._story_repository.append_entry(
+            session_id=session_id,
+            role="user",
+            content=cleaned,
+            entry_type="player_input",
+        )
+        history = self._story_repository.get_history(session_id)
+        reply, context_bundle = self._generate_story_reply(
+            project=project,
+            session=session,
+            history=history,
+        )
+        assistant_entry = self._story_repository.append_entry(
+            session_id=session_id,
+            role="assistant",
+            content=reply,
+            entry_type="narrative",
+        )
+
+        facts = self._story_repository.list_facts(session_id)
+        updated_facts = self._extract_story_facts([cleaned, reply], existing=facts)
+        self._story_repository.replace_facts(session_id=session_id, facts=updated_facts)
+        updated_summary = self._build_summary(
+            session.current_summary,
+            f"user: {cleaned}\nassistant: {reply}",
+        )
+        checkpoint = self._story_repository.create_checkpoint(
+            session_id=session_id,
+            title=f"Turn {max(1, assistant_entry.sequence // 2)}",
+            summary_text=updated_summary,
+            current_scene=reply,
+            facts_json=json.dumps(updated_facts, ensure_ascii=False),
+            last_sequence=assistant_entry.sequence,
+        )
+        self._story_repository.update_session_state(
+            session_id,
+            current_summary=updated_summary,
+            current_scene=reply,
+            active_checkpoint_id=checkpoint.checkpoint_id,
+        )
+        entry_count = self._story_repository.count_entries(session_id)
+        stats = self._compute_context_stats(session_id=session_id)
+        self._context_stats_by_session[session_id] = stats
+        return StoryContinueResult(
+            session_id=session_id,
+            reply=reply,
+            checkpoint_id=checkpoint.checkpoint_id,
+            entry_count=entry_count,
+            context_stats=replace(
+                stats,
+                context_char_budget=context_bundle.stats.context_char_budget,
+                lorebook_hit_count=context_bundle.stats.lorebook_hit_count,
+                recent_entry_chars=context_bundle.stats.recent_entry_chars,
+                recent_entry_count=context_bundle.stats.recent_entry_count,
+            ),
+        )
+
+    def run_story_action(
+        self,
+        *,
+        session_id: str,
+        action_type: str,
+        selected_text: str,
+        style: str | None = None,
+        shot: str | None = None,
+        voice: str | None = None,
+    ) -> StoryAigcActionPublic:
+        session = self._story_repository.get_session(session_id)
+        normalized_action = action_type.strip().lower()
+        text = selected_text.strip()
+        if not text:
+            raise ValueError("selected_text cannot be empty")
+
+        last_narrative = next(
+            (
+                item
+                for item in reversed(self._story_repository.get_history(session_id))
+                if item.role == "assistant" and item.entry_type == "narrative"
+            ),
+            None,
+        )
+        if last_narrative is None or text not in last_narrative.content:
+            raise ValueError("Story AIGC only supports text selected from the latest assistant narrative block.")
+
+        if normalized_action in {"image", "image_prompt", "image_generate"}:
+            tool_args = {
+                "paragraph": text,
+                "style": (style or "cinematic").strip() or "cinematic",
+                "shot": (shot or "medium shot").strip() or "medium shot",
+            }
+            if self._tool_runtime is not None and self._tool_runtime.enabled:
+                result = self._tool_runtime.execute_tool(
+                    name="build_image_prompt",
+                    arguments_json=json.dumps(tool_args, ensure_ascii=False),
+                    session_id=session_id,
+                )
+            else:
+                result = {
+                    "prompt": (
+                        f"{tool_args['style']} illustration, {tool_args['shot']}, focus on: {text[:700]}. "
+                        "high detail, coherent lighting, no watermark"
+                    ),
+                    "negative_prompt": "lowres, blurry, watermark, distorted anatomy, bad hands",
+                    "style": tool_args["style"],
+                    "shot": tool_args["shot"],
+                }
+            if normalized_action in {"image", "image_generate"}:
+                generated_result: dict[str, object] | None = None
+                image_error: str | None = None
+                if self._tool_runtime is not None and self._tool_runtime.image_generation_enabled:
+                    try:
+                        generated_result = self._tool_runtime.execute_tool(
+                            name="generate_image",
+                            arguments_json=json.dumps(
+                                {
+                                    "prompt": str(result.get("prompt", "")),
+                                    "negative_prompt": str(result.get("negative_prompt", "")),
+                                },
+                                ensure_ascii=False,
+                            ),
+                            session_id=session_id,
+                        )
+                    except Exception as exc:
+                        image_error = str(exc)
+                if generated_result is not None:
+                    result = {"prompt_payload": result, "image_result": generated_result}
+                    normalized_action = "image_generate"
+                else:
+                    if image_error:
+                        result = {**result, "image_error": image_error}
+                    normalized_action = "image_prompt"
+            else:
+                normalized_action = "image_prompt"
+        elif normalized_action in {"audio", "audio_plan", "tts"}:
+            chosen_voice = (voice or "neutral_female").strip() or "neutral_female"
+            result = {
+                "voice": chosen_voice,
+                "script": text[:1600],
+                "emotion": "immersive",
+                "pace": "medium",
+                "format": "mp3",
+                "project_id": session.project_id,
+            }
+            normalized_action = "audio_plan"
+        else:
+            raise ValueError("action_type must be one of: image_prompt, image_generate, audio_plan")
+
+        record = self._story_repository.create_action(
+            session_id=session_id,
+            action_type=normalized_action,
+            selected_text=text,
+            result_payload_json=json.dumps(result, ensure_ascii=False),
+        )
+        return self._to_story_action_public(record)
+
+    def list_story_actions(
+        self,
+        *,
+        session_id: str,
+        limit: int = 50,
+        offset: int = 0,
+    ) -> list[StoryAigcActionPublic]:
+        records = self._story_repository.list_actions(
+            session_id=session_id,
+            limit=limit,
+            offset=offset,
+        )
+        return [self._to_story_action_public(item) for item in records]
+
+    def _generate_story_reply(
+        self,
+        *,
+        project: StoredStoryProject,
+        session: StoredStorySession,
+        history: list[StoredStoryEntry],
+    ) -> tuple[str, StoryContextBundle]:
+        context_bundle = self._build_story_context_bundle(
+            project=project,
+            session=session,
+            history=history,
+        )
+        if self._app_settings_service is not None:
+            mode = self._app_settings_service.get_routing_mode()
+            if mode == "byok":
+                try:
+                    config = self._app_settings_service.get_byok_runtime_config()
+                    return ChatService._call_openai_compatible_chat_completion(
+                        endpoint=f"{config.base_url.rstrip('/')}/chat/completions",
+                        api_key=config.api_key,
+                        model=config.model,
+                        messages=context_bundle.messages,
+                        timeout_seconds=45.0,
+                    ), context_bundle
+                except Exception:
+                    pass
+
+        endpoint_reply = self._generate_story_endpoint_reply(messages=context_bundle.messages)
+        if endpoint_reply is not None:
+            return endpoint_reply, context_bundle
+
+        return self._generate_story_local_reply(project=project, history=history), context_bundle
+
+    def _generate_story_endpoint_reply(self, *, messages: list[dict[str, object]]) -> str | None:
+        if self._model_endpoint_service is None:
+            return None
+        for endpoint in self._select_story_endpoint_candidates():
+            try:
+                return ChatService._call_openai_compatible_chat_completion(
+                    endpoint=f"{endpoint.base_url.rstrip('/')}/chat/completions",
+                    api_key=endpoint.api_key,
+                    model=endpoint.model,
+                    messages=messages,
+                    timeout_seconds=45.0,
+                )
+            except Exception:
+                continue
+        return None
+
+    def _select_story_endpoint_candidates(self) -> list[ModelEndpointRuntime]:
+        if self._model_endpoint_service is None:
+            return []
+        endpoints = self._model_endpoint_service.list_runtime_endpoints()
+        if not endpoints:
+            return []
+        preferred_endpoint_id = None
+        if self._app_settings_service is not None:
+            preferred_endpoint_id = self._app_settings_service.get_generation_task_bindings().get(
+                "story_continue"
+            )
+        ordered = sorted(
+            endpoints,
+            key=lambda item: (
+                1 if item.is_fallback else 0,
+                item.priority,
+                item.name.lower(),
+            ),
+        )
+        if preferred_endpoint_id is None:
+            return ordered
+        preferred = next((item for item in ordered if item.endpoint_id == preferred_endpoint_id), None)
+        if preferred is None:
+            return ordered
+        return [preferred, *[item for item in ordered if item.endpoint_id != preferred_endpoint_id]]
+
+    def _build_story_context_bundle(
+        self,
+        *,
+        project: StoredStoryProject,
+        session: StoredStorySession,
+        history: list[StoredStoryEntry],
+    ) -> StoryContextBundle:
+        facts = self._story_repository.list_facts(session.session_id)
+        checkpoints = self._story_repository.list_checkpoints(session_id=session.session_id, limit=50, offset=0)
+        latest_user_message = next((item.content for item in reversed(history) if item.role == "user"), "")
+        checkpoint_summary = ""
+        if session.active_checkpoint_id:
+            try:
+                checkpoint = self._story_repository.get_checkpoint(session.active_checkpoint_id)
+                checkpoint_summary = checkpoint.summary_text.strip()
+            except StoryCheckpointNotFoundError:
+                checkpoint_summary = ""
+        lorebooks = self._story_repository.find_matching_lorebooks(
+            project_id=project.project_id,
+            message="\n".join(
+                part for part in [latest_user_message, session.current_scene, session.current_summary] if part
+            ),
+            max_items=6,
+        )
+        lore_context = self._compose_budgeted_lorebook_context(lorebooks)
+        fact_lines = self._compose_budgeted_fact_context(facts)
+        recent_history = self._trim_recent_entries(history)
+        system_sections = [
+            "You are an interactive fiction narrator.",
+            "Continue the story in immersive prose and respond directly to the player's latest input.",
+            "Advance the scene coherently, preserve continuity, and avoid bullet lists unless explicitly requested.",
+            f"Story title: {self._truncate(project.title, 200)}",
+            f"Premise: {self._truncate(project.premise, 1500)}",
+        ]
+        if project.system_prompt.strip():
+            system_sections.append(
+                f"Additional instruction: {self._truncate(project.system_prompt.strip(), 1200)}"
+            )
+        if session.current_summary.strip():
+            system_sections.append(
+                f"Story summary:\n{self._truncate(session.current_summary.strip(), self._SUMMARY_MAX_CHARS)}"
+            )
+        if checkpoint_summary:
+            system_sections.append(
+                "Active checkpoint summary:\n"
+                f"{self._truncate(checkpoint_summary, self._CHECKPOINT_SUMMARY_MAX_CHARS)}"
+            )
+        if lore_context:
+            system_sections.append(f"Matched story lorebook:\n{lore_context}")
+        if fact_lines:
+            system_sections.append(f"Established facts:\n{fact_lines}")
+        system_prompt = "\n\n".join(section for section in system_sections if section.strip())
+        messages: list[dict[str, object]] = [{"role": "system", "content": system_prompt}]
+        for item in recent_history:
+            if item.role not in {"user", "assistant"}:
+                continue
+            messages.append({"role": item.role, "content": item.content})
+        stats = StoryContextStats(
+            session_id=session.session_id,
+            context_char_budget=self._CONTEXT_CHAR_BUDGET,
+            summary_chars=len(session.current_summary),
+            fact_count=len(facts),
+            lorebook_hit_count=len(lorebooks),
+            recent_entry_chars=sum(len(item.content) for item in recent_history),
+            recent_entry_count=len(recent_history),
+            checkpoint_count=len(checkpoints),
+            updated_at=datetime.now(timezone.utc),
+        )
+        return StoryContextBundle(messages=messages, stats=stats)
+
+    def _generate_story_local_reply(
+        self,
+        *,
+        project: StoredStoryProject,
+        history: list[StoredStoryEntry],
+    ) -> str:
+        latest_user = next((item.content for item in reversed(history) if item.role == "user"), "")
+        scene_seed = project.opening_scene.strip() or project.premise.strip()
+        return (
+            f"{scene_seed[:600]}\n\n"
+            f"你刚刚的行动是：{latest_user[:800]}。\n"
+            "场景因此继续推进：周围环境给出了新的反馈，人物关系与局势开始发生细微变化。"
+            "接下来你可以继续推动局面，或追问眼前最异常的细节。"
+        ).strip()
+
+    def _compute_context_stats(self, *, session_id: str) -> StoryContextStats:
+        session = self._story_repository.get_session(session_id)
+        history = self._story_repository.get_history(session_id)
+        facts = self._story_repository.list_facts(session_id)
+        checkpoints = self._story_repository.list_checkpoints(session_id=session_id, limit=100, offset=0)
+        lorebooks = self._story_repository.find_matching_lorebooks(
+            project_id=session.project_id,
+            message="\n".join(
+                [
+                    session.current_summary,
+                    session.current_scene,
+                    next((item.content for item in reversed(history) if item.role == "user"), ""),
+                ]
+            ),
+            max_items=6,
+        )
+        recent_history = self._trim_recent_entries(history)
+        recent_chars = sum(len(item.content) for item in recent_history)
+        return StoryContextStats(
+            session_id=session_id,
+            context_char_budget=self._CONTEXT_CHAR_BUDGET,
+            summary_chars=len(session.current_summary),
+            fact_count=len(facts),
+            lorebook_hit_count=len(lorebooks),
+            recent_entry_chars=recent_chars,
+            recent_entry_count=len(recent_history),
+            checkpoint_count=len(checkpoints),
+            updated_at=datetime.now(timezone.utc),
+        )
+
+    @staticmethod
+    def _build_summary(previous: str, segment: str) -> str:
+        merged = _merge_summary_locally(previous, segment)
+        if len(merged) <= 4000:
+            return merged
+        return merged[:1800] + "\n...\n" + merged[-1800:]
+
+    @staticmethod
+    def _extract_story_facts(
+        snippets: list[str],
+        *,
+        existing: list[StoredStoryFact] | None = None,
+    ) -> list[str]:
+        facts: list[str] = []
+        seen: set[str] = set()
+        if existing:
+            for item in existing[-8:]:
+                text = item.fact_text.strip()
+                if text and text not in seen:
+                    seen.add(text)
+                    facts.append(text)
+        for snippet in snippets:
+            raw_lines = re.split(r"[\n。！？!?]+", snippet)
+            for raw in raw_lines:
+                text = raw.strip()
+                if len(text) < 8:
+                    continue
+                normalized = text[:180]
+                if normalized in seen:
+                    continue
+                seen.add(normalized)
+                facts.append(normalized)
+                if len(facts) >= 12:
+                    return facts[-12:]
+        return facts[-12:]
+
+    def _compose_budgeted_lorebook_context(self, lorebooks: list[StoredStoryLorebook]) -> str:
+        chunks: list[str] = []
+        total = 0
+        for item in lorebooks:
+            chunk = f"[{item.keyword}] {item.insert_text.strip()}"
+            if not chunk.strip():
+                continue
+            remaining = self._LOREBOOK_TOTAL_MAX_CHARS - total
+            if remaining <= 0:
+                break
+            if len(chunk) > remaining:
+                chunk = chunk[:remaining]
+            chunks.append(chunk)
+            total += len(chunk)
+        return "\n".join(chunks)
+
+    def _compose_budgeted_fact_context(self, facts: list[StoredStoryFact]) -> str:
+        chunks: list[str] = []
+        total = 0
+        for item in facts[-12:]:
+            chunk = f"- {item.fact_text.strip()}"
+            if not chunk.strip():
+                continue
+            remaining = self._FACTS_TOTAL_MAX_CHARS - total
+            if remaining <= 0:
+                break
+            if len(chunk) > remaining:
+                chunk = chunk[:remaining]
+            chunks.append(chunk)
+            total += len(chunk)
+        return "\n".join(chunks)
+
+    def _trim_recent_entries(self, history: list[StoredStoryEntry]) -> list[StoredStoryEntry]:
+        recent: list[StoredStoryEntry] = []
+        total = 0
+        for item in reversed(history):
+            if item.role not in {"user", "assistant"}:
+                continue
+            length = len(item.content)
+            if recent and total + length > self._RECENT_TOTAL_MAX_CHARS:
+                break
+            if not recent and length > self._RECENT_TOTAL_MAX_CHARS:
+                truncated = StoredStoryEntry(
+                    entry_id=item.entry_id,
+                    session_id=item.session_id,
+                    role=item.role,
+                    content=item.content[-self._RECENT_TOTAL_MAX_CHARS :],
+                    entry_type=item.entry_type,
+                    sequence=item.sequence,
+                    created_at=item.created_at,
+                )
+                recent.append(truncated)
+                break
+            recent.append(item)
+            total += length
+            if len(recent) >= 10:
+                break
+        recent.reverse()
+        return recent
+
+    @staticmethod
+    def _truncate(text: str, limit: int) -> str:
+        cleaned = text.strip()
+        if len(cleaned) <= limit:
+            return cleaned
+        return cleaned[:limit]
+
+    @staticmethod
+    def _to_story_action_public(record: StoredStoryAction) -> StoryAigcActionPublic:
+        try:
+            parsed = json.loads(record.result_payload_json)
+            result = parsed if isinstance(parsed, dict) else {}
+        except Exception:
+            result = {}
+        return StoryAigcActionPublic(
+            action_id=record.action_id,
+            session_id=record.session_id,
+            action_type=record.action_type,
+            selected_text=record.selected_text,
+            result=result,
+            created_at=record.created_at,
+        )

@@ -57,6 +57,10 @@ TASK_BINDING_DEFS: list[tuple[str, str]] = [
     ("plan_dispatch", "任务分发"),
     ("character_card_generate", "角色卡生成"),
     ("lorebook_generate", "世界书生成"),
+    ("story_blueprint_generate", "故事蓝图生成"),
+    ("story_lorebook_generate", "故事世界书生成"),
+    ("story_continuity_review", "故事连续性审核"),
+    ("story_continue", "故事续写"),
     ("illustration_prompt_generate", "插图提示词"),
     ("audio_plan_generate", "音频方案"),
     ("result_review", "结果审核"),
@@ -194,14 +198,30 @@ def main(page: ft.Page) -> None:
 
     state: dict[str, Any] = {
         "is_dark": False,
+        "active_mode": "roleplay",
         "characters":[],
         "selected_character": None,
+        "editing_character_id": None,
         "selected_session_id": None,
         "builder_notes": [],
         "builder_messages":[],
         "role_messages": [],
         "role_actions":[],
         "draft_lorebook_entries":[],
+        "action_scope": "roleplay",
+        "stories": [],
+        "selected_story": None,
+        "editing_story_id": None,
+        "story_session_id": None,
+        "story_session": None,
+        "story_messages": [],
+        "story_facts": [],
+        "story_checkpoints": [],
+        "story_lorebooks": [],
+        "editing_story_lorebook_id": None,
+        "story_actions": [],
+        "story_context_stats": None,
+        "story_draft_payload": None,
         "settings": {
             "mode": "trial",
             "byok_base_url": "",
@@ -237,12 +257,15 @@ def main(page: ft.Page) -> None:
 
     # ---- controls ----
     sidebar_title = ft.Text("AI Roleplay", size=20, weight=ft.FontWeight.W_700)
-    sidebar_subtitle = ft.Text("Workspace", size=12)
+    sidebar_subtitle = ft.Text("双模式桌面端", size=12)
+    roleplay_mode_btn = ft.ElevatedButton(content=ft.Text("角色扮演"))
+    story_mode_btn = ft.TextButton(content=ft.Text("互动小说"))
 
     create_new_btn = ft.ElevatedButton(
         content=ft.Text("+ 新建角色", weight=ft.FontWeight.W_600),
         style=ft.ButtonStyle(shape=ft.RoundedRectangleBorder(radius=16), padding=16),
     )
+    nav_section_title = ft.Text("我的角色", size=13, weight=ft.FontWeight.W_600)
     character_list = ft.ListView(expand=True, spacing=8, padding=2)
 
     header_title = ft.Text("角色创建向导", size=24, weight=ft.FontWeight.W_700)
@@ -252,6 +275,8 @@ def main(page: ft.Page) -> None:
     theme_label = ft.Text("浅色", size=12, weight=ft.FontWeight.W_600)
     theme_switch = ft.Switch(value=False)
     settings_btn = ft.TextButton(content=ft.Text("模型设置"))
+    edit_btn = ft.TextButton(content=ft.Text("编辑"), visible=False)
+    delete_btn = ft.TextButton(content=ft.Text("删除"), visible=False)
     export_btn = ft.ElevatedButton(
         content=ft.Text("导出角色"), visible=False,
         style=ft.ButtonStyle(shape=ft.RoundedRectangleBorder(radius=12), padding=12),
@@ -345,14 +370,223 @@ def main(page: ft.Page) -> None:
         ],
     )
 
+    story_title = ft.TextField(label="故事标题", border_radius=12)
+    story_premise = ft.TextField(label="故事设定 / 核心前提", multiline=True, min_lines=4, max_lines=8, border_radius=12)
+    story_opening = ft.TextField(label="开场场景", multiline=True, min_lines=3, max_lines=6, border_radius=12)
+    story_system = ft.TextField(label="叙事规则（可选）", multiline=True, min_lines=3, max_lines=6, border_radius=12)
+    save_story_btn = ft.ElevatedButton(
+        content=ft.Text("保存故事项目"),
+        style=ft.ButtonStyle(shape=ft.RoundedRectangleBorder(radius=16), padding=16),
+    )
+    story_draft_prompt = ft.TextField(
+        label="一句话生成故事草案",
+        hint_text="例如：写一个赛博雨夜里的侦探互动小说，主角要追查失踪仿生人",
+        multiline=True,
+        min_lines=2,
+        max_lines=5,
+        border_radius=12,
+    )
+    story_draft_generate_btn = ft.ElevatedButton(
+        content=ft.Text("生成故事草案"),
+        style=ft.ButtonStyle(shape=ft.RoundedRectangleBorder(radius=16), padding=16),
+    )
+    story_draft_status = ft.Text("草案状态：未生成", size=12, weight=ft.FontWeight.W_700)
+    story_draft_title = ft.TextField(label="草案标题", border_radius=12)
+    story_draft_premise = ft.TextField(label="草案前提", multiline=True, min_lines=3, max_lines=6, border_radius=12)
+    story_draft_opening = ft.TextField(label="草案开场", multiline=True, min_lines=3, max_lines=6, border_radius=12)
+    story_draft_system = ft.TextField(label="草案叙事规则", multiline=True, min_lines=3, max_lines=6, border_radius=12)
+    story_draft_tone = ft.TextField(label="叙事风格", border_radius=12)
+    story_draft_protagonist = ft.TextField(label="主角设定", multiline=True, min_lines=2, max_lines=4, border_radius=12)
+    story_draft_chapters = ft.TextField(
+        label="章节大纲（每行一章，至少 3 行）",
+        multiline=True,
+        min_lines=4,
+        max_lines=8,
+        border_radius=12,
+    )
+    story_draft_lorebook = ft.TextField(
+        label="世界书条目（格式：关键词 | 排序 | 插入文本，每行一条）",
+        multiline=True,
+        min_lines=4,
+        max_lines=8,
+        border_radius=12,
+    )
+    story_draft_illustration = ft.TextField(label="插图提示词", multiline=True, min_lines=2, max_lines=4, border_radius=12)
+    story_draft_audio = ft.TextField(label="音频方案", multiline=True, min_lines=2, max_lines=4, border_radius=12)
+    story_draft_review = ft.TextField(label="连续性检查", multiline=True, min_lines=2, max_lines=5, read_only=True, border_radius=12)
+    story_draft_apply_new_btn = ft.ElevatedButton(
+        content=ft.Text("应用为新故事"),
+        style=ft.ButtonStyle(shape=ft.RoundedRectangleBorder(radius=16), padding=16),
+    )
+    story_draft_apply_current_btn = ft.TextButton(content=ft.Text("覆盖当前故事"))
+    story_draft_card = ft.Container(
+        visible=False,
+        border_radius=20,
+        padding=24,
+        content=ft.Column(
+            spacing=12,
+            controls=[
+                ft.Text("故事草案（可编辑后应用）", weight=ft.FontWeight.W_700, size=16),
+                story_draft_status,
+                story_draft_title,
+                story_draft_premise,
+                story_draft_opening,
+                story_draft_system,
+                ft.Row([story_draft_tone, story_draft_protagonist], spacing=12),
+                story_draft_chapters,
+                story_draft_lorebook,
+                story_draft_illustration,
+                story_draft_audio,
+                story_draft_review,
+                ft.Row([story_draft_apply_new_btn, story_draft_apply_current_btn], spacing=12),
+            ],
+        ),
+    )
+
+    story_builder_view = ft.Column(
+        visible=False, expand=True, scroll=ft.ScrollMode.AUTO, spacing=16,
+        controls=[
+            ft.Container(
+                border_radius=20, padding=24,
+                content=ft.Column(
+                    spacing=12,
+                    controls=[
+                        ft.Text("AI 故事草案生成", weight=ft.FontWeight.W_700, size=16),
+                        ft.Text("输入自然语言需求，系统会生成故事蓝图、章节大纲、项目世界书和连续性检查。", size=12),
+                        story_draft_prompt,
+                        story_draft_generate_btn,
+                    ],
+                ),
+            ),
+            story_draft_card,
+            ft.Container(
+                border_radius=20, padding=24,
+                content=ft.Column(
+                    spacing=12,
+                    controls=[
+                        ft.Text("互动小说项目", weight=ft.FontWeight.W_700, size=16),
+                        ft.Text("填写故事基础信息后保存到左侧故事栏。打开故事后可续写、管理世界书并触发段落级 AIGC。", size=12),
+                        story_title,
+                        story_premise,
+                        story_opening,
+                        story_system,
+                        save_story_btn,
+                    ],
+                ),
+            )
+        ],
+    )
+
+    story_detail_title = ft.Text("", size=20, weight=ft.FontWeight.W_800)
+    story_detail_premise = ft.Text("", size=13, selectable=True)
+    story_summary = ft.Text("暂无摘要", size=13, selectable=True)
+    story_scene = ft.Text("暂无当前场景", size=13, selectable=True)
+    story_context_stats_text = ft.Text("上下文状态：未加载", size=12)
+
+    story_chat = ft.ListView(expand=True, spacing=16, auto_scroll=True)
+    story_input = ft.TextField(hint_text="输入你的选择、行动或下一段要求...", expand=True, border_radius=24, content_padding=20)
+    story_send_btn = ft.IconButton(
+        icon=ft.Icons.ARROW_UPWARD, icon_color="#FFFFFF", bgcolor=c("primary")
+    )
+
+    story_facts_list = ft.ListView(height=140, spacing=8, padding=2)
+    story_checkpoints_list = ft.ListView(height=150, spacing=8, padding=2)
+    story_actions_list = ft.ListView(height=180, spacing=8, padding=2, auto_scroll=True)
+
+    story_lore_keyword = ft.TextField(label="触发词", border_radius=12)
+    story_lore_text = ft.TextField(label="插入文本", multiline=True, min_lines=3, max_lines=6, border_radius=12)
+    story_lore_order = ft.TextField(label="排序", value="100", border_radius=12)
+    story_lore_enabled = ft.Switch(label="启用", value=True)
+    story_lore_save_btn = ft.ElevatedButton(
+        content=ft.Text("保存世界书条目"),
+        style=ft.ButtonStyle(shape=ft.RoundedRectangleBorder(radius=12), padding=12),
+    )
+    story_lore_clear_btn = ft.TextButton(content=ft.Text("清空表单"))
+    story_lorebook_list = ft.ListView(height=220, spacing=8, padding=2)
+
+    story_view = ft.Column(
+        visible=False, expand=True, scroll=ft.ScrollMode.AUTO, spacing=16,
+        controls=[
+            ft.Container(
+                border_radius=20, padding=20,
+                content=ft.Column(
+                    spacing=8,
+                    controls=[
+                        story_detail_title,
+                        story_detail_premise,
+                        ft.Text("当前摘要", weight=ft.FontWeight.W_600, size=12),
+                        story_summary,
+                        ft.Text("当前场景", weight=ft.FontWeight.W_600, size=12),
+                        story_scene,
+                        story_context_stats_text,
+                    ],
+                ),
+            ),
+            ft.Container(
+                height=620, border_radius=20, padding=20,
+                content=ft.Column(
+                    expand=True, spacing=12,
+                    controls=[
+                        ft.Text("互动小说续写", weight=ft.FontWeight.W_700),
+                        story_chat,
+                        ft.Row([story_input, story_send_btn], spacing=12),
+                    ],
+                ),
+            ),
+            ft.Row(
+                spacing=16,
+                vertical_alignment=ft.CrossAxisAlignment.START,
+                controls=[
+                    ft.Container(
+                        expand=True, border_radius=20, padding=18,
+                        content=ft.Column(
+                            spacing=10,
+                            controls=[
+                                ft.Text("事实记忆", weight=ft.FontWeight.W_700),
+                                story_facts_list,
+                                ft.Divider(height=14, color=ft.Colors.TRANSPARENT),
+                                ft.Text("检查点", weight=ft.FontWeight.W_700),
+                                story_checkpoints_list,
+                            ],
+                        ),
+                    ),
+                    ft.Container(
+                        expand=True, border_radius=20, padding=18,
+                        content=ft.Column(
+                            spacing=10,
+                            controls=[
+                                ft.Text("段落级 AIGC 动作历史", weight=ft.FontWeight.W_700),
+                                story_actions_list,
+                            ],
+                        ),
+                    ),
+                ],
+            ),
+            ft.Container(
+                border_radius=20, padding=18,
+                content=ft.Column(
+                    spacing=10,
+                    controls=[
+                        ft.Text("项目世界书", weight=ft.FontWeight.W_700),
+                        ft.Row([story_lore_keyword, story_lore_order], spacing=12),
+                        story_lore_text,
+                        ft.Row([story_lore_enabled, story_lore_save_btn, story_lore_clear_btn], spacing=12),
+                        story_lorebook_list,
+                    ],
+                ),
+            ),
+        ],
+    )
+
     sidebar = ft.Container(
         width=300, padding=24,
         content=ft.Column(
             expand=True, spacing=20,
             controls=[
                 ft.Column([sidebar_title, sidebar_subtitle], spacing=4),
+                ft.Row([roleplay_mode_btn, story_mode_btn], spacing=8),
                 create_new_btn,
-                ft.Text("我的角色", size=13, weight=ft.FontWeight.W_600),
+                nav_section_title,
                 character_list,
             ],
         ),
@@ -360,7 +594,7 @@ def main(page: ft.Page) -> None:
 
     header_right = ft.Row(
         spacing=12,
-        controls=[theme_label, theme_switch, settings_btn, back_to_builder_btn, export_btn],
+        controls=[theme_label, theme_switch, settings_btn, back_to_builder_btn, edit_btn, delete_btn, export_btn],
     )
 
     main_content = ft.Container(
@@ -378,6 +612,8 @@ def main(page: ft.Page) -> None:
                 ),
                 builder_view,
                 role_view,
+                story_builder_view,
+                story_view,
             ],
         ),
     )
@@ -545,16 +781,19 @@ def main(page: ft.Page) -> None:
         lines =[line.strip() for line in normalized.split("\n") if line.strip()]
         return lines[:20]
 
-    def make_bubble(role: str, content: str, *, allow_action: bool = False) -> ft.Container:
+    def make_bubble(role: str, content: str, *, allow_action: bool = False, action_scope: str = "roleplay") -> ft.Container:
         is_user = role == "user"
         bubble_color = c("user") if is_user else c("assistant")
         label = "你" if is_user else "助手"
 
         header_controls: list[ft.Control] =[ft.Text(label, size=11, color=c("muted"), weight=ft.FontWeight.W_600)]
         if allow_action and content.strip() and content.strip() not in {"思考中...", "正在启动角色会话..."}:
-            header_controls.append(
-                ft.TextButton("整条AIGC", height=24, on_click=lambda _e, txt=content: page.run_task(open_action_dialog, txt))
-            )
+            if action_scope == "story":
+                header_controls.append(ft.Text("可对最新叙事段落生成图片/音频方案", size=10, color=c("muted")))
+            else:
+                header_controls.append(
+                    ft.TextButton("整条AIGC", height=24, on_click=lambda _e, txt=content, scope=action_scope: page.run_task(open_action_dialog, txt, scope))
+                )
 
         paragraph_controls: list[ft.Control] =[]
         paragraphs = split_paragraphs(content)
@@ -573,14 +812,28 @@ def main(page: ft.Page) -> None:
                         controls=[
                             ft.Text("右键/长按本段落触发 AIGC", size=10, color=c("muted")),
                             text_control,
+                            *(
+                                [
+                                    ft.Row(
+                                        spacing=8,
+                                        controls=[
+                                            ft.TextButton("图片提示词", on_click=lambda _e, txt=paragraph_text: page.run_task(open_action_dialog, txt, "story", "image_prompt")),
+                                            ft.TextButton("直接生图", on_click=lambda _e, txt=paragraph_text: page.run_task(open_action_dialog, txt, "story", "image_generate")),
+                                            ft.TextButton("音频方案", on_click=lambda _e, txt=paragraph_text: page.run_task(open_action_dialog, txt, "story", "audio_plan")),
+                                        ],
+                                    )
+                                ]
+                                if action_scope == "story"
+                                else []
+                            ),
                         ],
                     ),
                 )
                 paragraph_controls.append(
                     ft.GestureDetector(
                         content=interactive_block,
-                        on_secondary_tap=lambda _e, txt=paragraph_text: page.run_task(open_action_dialog, txt),
-                        on_long_press=lambda _e, txt=paragraph_text: page.run_task(open_action_dialog, txt),
+                        on_secondary_tap=lambda _e, txt=paragraph_text, scope=action_scope: page.run_task(open_action_dialog, txt, scope),
+                        on_long_press=lambda _e, txt=paragraph_text, scope=action_scope: page.run_task(open_action_dialog, txt, scope),
                     )
                 )
             else:
@@ -619,6 +872,19 @@ def main(page: ft.Page) -> None:
         for role, text in state["role_messages"]:
             role_chat.controls.append(make_bubble(role, text, allow_action=True))
 
+    def render_story_messages() -> None:
+        story_chat.controls.clear()
+        messages = state.get("story_messages", [])
+        rows = messages if isinstance(messages, list) else []
+        latest_assistant_idx = next(
+            (idx for idx in range(len(rows) - 1, -1, -1) if rows[idx][0] == "assistant" and str(rows[idx][1]).strip()),
+            -1,
+        )
+        for idx, (role, text) in enumerate(rows):
+            story_chat.controls.append(
+                make_bubble(role, text, allow_action=(role == "assistant" and idx == latest_assistant_idx), action_scope="story")
+            )
+
     def render_action_history() -> None:
         action_history_list.controls.clear()
         items = state.get("role_actions")
@@ -646,10 +912,162 @@ def main(page: ft.Page) -> None:
                 )
             )
 
+    def render_story_action_history() -> None:
+        story_actions_list.controls.clear()
+        items = state.get("story_actions")
+        if not isinstance(items, list) or not items:
+            story_actions_list.controls.append(ft.Text("暂无故事动作结果。可在助手叙事段落触发 AIGC。", size=12, color=c("muted")))
+            return
+
+        for item in reversed(items[-20:]):
+            if not isinstance(item, dict):
+                continue
+            action_name = str(item.get("action_type") or "action")
+            selected_text = str(item.get("selected_text") or "")
+            result_obj = item.get("result")
+            result_text = format_action_result(result_obj if isinstance(result_obj, dict) else {})
+            story_actions_list.controls.append(
+                ft.Container(
+                    border=ft.border.all(1, c("border")), border_radius=16, bgcolor=c("surface"), padding=14,
+                    content=ft.Column(
+                        spacing=6,
+                        controls=[
+                            ft.Text(f"动作: {action_name}", size=13, weight=ft.FontWeight.W_700, color=c("text")),
+                            ft.Text(f"原文: {selected_text[:140]}", size=12, color=c("muted")),
+                            ft.Text(result_text[:600], size=13, color=c("text"), selectable=True),
+                        ],
+                    ),
+                )
+            )
+
+    def render_story_memory_panels() -> None:
+        story_facts_list.controls.clear()
+        facts = state.get("story_facts")
+        fact_rows = facts if isinstance(facts, list) else []
+        if not fact_rows:
+            story_facts_list.controls.append(ft.Text("暂无事实记忆。续写后会自动积累。", size=12, color=c("muted")))
+        for item in fact_rows[:30]:
+            if not isinstance(item, dict):
+                continue
+            story_facts_list.controls.append(
+                ft.Text(str(item.get("fact_text") or ""), size=12, color=c("text"), selectable=True)
+            )
+
+        story_checkpoints_list.controls.clear()
+        checkpoints = state.get("story_checkpoints")
+        checkpoint_rows = checkpoints if isinstance(checkpoints, list) else []
+        if not checkpoint_rows:
+            story_checkpoints_list.controls.append(ft.Text("暂无检查点。续写后会自动生成。", size=12, color=c("muted")))
+        for item in reversed(checkpoint_rows[-12:]):
+            if not isinstance(item, dict):
+                continue
+            checkpoint_id = str(item.get("checkpoint_id") or "")
+            title = str(item.get("title") or "检查点")
+            summary = str(item.get("summary_text") or "")[:120]
+            story_checkpoints_list.controls.append(
+                ft.Container(
+                    border=ft.border.all(1, c("border")), border_radius=14, padding=10, bgcolor=c("surface"),
+                    content=ft.Column(
+                        spacing=4,
+                        controls=[
+                            ft.Text(title, size=12, weight=ft.FontWeight.W_700, color=c("text")),
+                            ft.Text(summary, size=11, color=c("muted"), max_lines=3),
+                            ft.TextButton("回滚到此检查点", on_click=lambda _e, cid=checkpoint_id: page.run_task(on_rollback_story_checkpoint, cid)),
+                        ],
+                    ),
+                )
+            )
+
+    def clear_story_lorebook_form() -> None:
+        state["editing_story_lorebook_id"] = None
+        story_lore_keyword.value = ""
+        story_lore_text.value = ""
+        story_lore_order.value = "100"
+        story_lore_enabled.value = True
+        story_lore_save_btn.content = ft.Text("保存世界书条目")
+
+    def set_story_lorebook_form(item: dict[str, Any]) -> None:
+        state["editing_story_lorebook_id"] = str(item.get("lorebook_id") or "") or None
+        story_lore_keyword.value = str(item.get("keyword") or "")
+        story_lore_text.value = str(item.get("insert_text") or "")
+        story_lore_order.value = str(item.get("sort_order", 100))
+        story_lore_enabled.value = bool(item.get("enabled", True))
+        story_lore_save_btn.content = ft.Text("保存修改")
+        page.update()
+
+    def render_story_lorebooks() -> None:
+        story_lorebook_list.controls.clear()
+        items = state.get("story_lorebooks")
+        rows = items if isinstance(items, list) else []
+        if not rows:
+            story_lorebook_list.controls.append(ft.Text("暂无世界书条目。", size=12, color=c("muted")))
+            return
+        for item in rows:
+            if not isinstance(item, dict):
+                continue
+            lorebook_id = str(item.get("lorebook_id") or "")
+            story_lorebook_list.controls.append(
+                ft.Container(
+                    border=ft.border.all(1, c("border")), border_radius=14, padding=12, bgcolor=c("surface"),
+                    content=ft.Column(
+                        spacing=6,
+                        controls=[
+                            ft.Text(f"{item.get('keyword') or '未命名触发词'} · sort={item.get('sort_order', 100)}", size=13, weight=ft.FontWeight.W_700, color=c("text")),
+                            ft.Text(str(item.get("insert_text") or "")[:240], size=12, color=c("muted"), selectable=True),
+                            ft.Row(
+                                spacing=8,
+                                controls=[
+                                    ft.TextButton("编辑", on_click=lambda _e, x=item: set_story_lorebook_form(x)),
+                                    ft.TextButton("删除", on_click=lambda _e, lid=lorebook_id: page.run_task(on_delete_story_lorebook, lid)),
+                                ],
+                            ),
+                        ],
+                    ),
+                )
+            )
+
     def render_character_list() -> None:
         character_list.controls.clear()
+        if state.get("active_mode") == "story":
+            nav_section_title.value = "我的故事"
+            create_new_btn.content = ft.Text("+ 新建故事", weight=ft.FontWeight.W_600)
+            selected = state.get("selected_story")
+            selected_id = selected.get("project_id") if isinstance(selected, dict) else None
+
+            if not state.get("stories"):
+                character_list.controls.append(ft.Text("暂无故事。点击上方新建。", size=12, color=c("muted")))
+                return
+
+            for item in state.get("stories", []):
+                if not isinstance(item, dict):
+                    continue
+                pid = item.get("project_id")
+                if not pid:
+                    continue
+                is_selected = pid == selected_id
+                tile = ft.Container(
+                    bgcolor=c("sidebar_active") if is_selected else "transparent",
+                    border_radius=16, padding=12, ink=True,
+                    on_click=lambda _e, x=item: page.run_task(select_story, x),
+                    content=ft.Column(
+                        spacing=4,
+                        controls=[
+                            ft.Text(item.get("title") or "未命名故事", size=15, color=c("primary") if is_selected else c("text"), weight=ft.FontWeight.W_600),
+                            ft.Text((item.get("premise") or "无设定")[:45], size=12, color=c("muted"), max_lines=2),
+                        ],
+                    ),
+                )
+                character_list.controls.append(tile)
+            return
+
+        nav_section_title.value = "我的角色"
+        create_new_btn.content = ft.Text("+ 新建角色", weight=ft.FontWeight.W_600)
         selected = state.get("selected_character")
         selected_id = selected.get("character_id") if isinstance(selected, dict) else None
+
+        if not state.get("characters"):
+            character_list.controls.append(ft.Text("暂无角色。点击上方新建。", size=12, color=c("muted")))
+            return
 
         for item in state["characters"]:
             cid = item.get("character_id")
@@ -1010,6 +1428,7 @@ def main(page: ft.Page) -> None:
 
         sidebar_title.color = c("text")
         sidebar_subtitle.color = c("muted")
+        nav_section_title.color = c("muted")
         header_title.color = c("text")
         header_subtitle.color = c("muted")
         mode_badge.color = c("muted")
@@ -1017,12 +1436,45 @@ def main(page: ft.Page) -> None:
         theme_label.value = "深色" if state["is_dark"] else "浅色"
 
         create_new_btn.style = ft.ButtonStyle(bgcolor=c("primary"), color="#FFFFFF", shape=ft.RoundedRectangleBorder(radius=16), padding=16)
+        roleplay_mode_btn.style = ft.ButtonStyle(
+            bgcolor=c("primary") if state.get("active_mode") == "roleplay" else c("surface"),
+            color="#FFFFFF" if state.get("active_mode") == "roleplay" else c("text"),
+            shape=ft.RoundedRectangleBorder(radius=12),
+            padding=10,
+        )
+        story_mode_btn.style = ft.ButtonStyle(
+            bgcolor=c("primary") if state.get("active_mode") == "story" else c("surface"),
+            color="#FFFFFF" if state.get("active_mode") == "story" else c("text"),
+            shape=ft.RoundedRectangleBorder(radius=12),
+            padding=10,
+        )
         export_btn.style = ft.ButtonStyle(bgcolor=c("sidebar") if state["is_dark"] else "#111827", color="#FFFFFF", shape=ft.RoundedRectangleBorder(radius=12), padding=12)
+        edit_btn.style = ft.ButtonStyle(color=c("text"))
+        delete_btn.style = ft.ButtonStyle(color=c("danger"))
         builder_send_btn.bgcolor = c("primary")
         role_send_btn.bgcolor = c("primary")
+        story_send_btn.bgcolor = c("primary")
         save_role_btn.style = ft.ButtonStyle(bgcolor=c("success"), color="#FFFFFF", shape=ft.RoundedRectangleBorder(radius=16), padding=16)
+        save_story_btn.style = ft.ButtonStyle(bgcolor=c("success"), color="#FFFFFF", shape=ft.RoundedRectangleBorder(radius=16), padding=16)
+        story_draft_generate_btn.style = ft.ButtonStyle(bgcolor=c("primary"), color="#FFFFFF", shape=ft.RoundedRectangleBorder(radius=16), padding=16)
+        story_draft_apply_new_btn.style = ft.ButtonStyle(bgcolor=c("success"), color="#FFFFFF", shape=ft.RoundedRectangleBorder(radius=16), padding=16)
+        story_draft_apply_current_btn.style = ft.ButtonStyle(color=c("text"), shape=ft.RoundedRectangleBorder(radius=16), padding=16)
+        story_lore_save_btn.style = ft.ButtonStyle(bgcolor=c("primary"), color="#FFFFFF", shape=ft.RoundedRectangleBorder(radius=12), padding=12)
 
-        for card in (builder_view.controls[0], draft_card, role_view.controls[0], role_view.controls[1]):
+        for card in (
+            builder_view.controls[0],
+            draft_card,
+            role_view.controls[0],
+            role_view.controls[1],
+            story_builder_view.controls[0],
+            story_builder_view.controls[1],
+            story_builder_view.controls[2],
+            story_view.controls[0],
+            story_view.controls[1],
+            story_view.controls[2].controls[0],
+            story_view.controls[2].controls[1],
+            story_view.controls[3],
+        ):
             if isinstance(card, ft.Container):
                 card.bgcolor = c("bg")
                 card.border = ft.border.all(1, c("border"))
@@ -1030,6 +1482,19 @@ def main(page: ft.Page) -> None:
         for tf in (
             builder_input,
             role_input,
+            story_input,
+            story_draft_prompt,
+            story_draft_title,
+            story_draft_premise,
+            story_draft_opening,
+            story_draft_system,
+            story_draft_tone,
+            story_draft_protagonist,
+            story_draft_chapters,
+            story_draft_lorebook,
+            story_draft_illustration,
+            story_draft_audio,
+            story_draft_review,
             draft_name,
             draft_desc,
             draft_first,
@@ -1037,6 +1502,13 @@ def main(page: ft.Page) -> None:
             draft_lorebook,
             draft_illustration,
             draft_audio,
+            story_title,
+            story_premise,
+            story_opening,
+            story_system,
+            story_lore_keyword,
+            story_lore_text,
+            story_lore_order,
             byok_base,
             byok_model,
             byok_key,
@@ -1058,6 +1530,12 @@ def main(page: ft.Page) -> None:
         draft_source.color = c("muted")
         draft_route_note.color = c("text")
         action_history_title.color = c("muted")
+        story_detail_title.color = c("text")
+        story_detail_premise.color = c("muted")
+        story_summary.color = c("text")
+        story_scene.color = c("text")
+        story_context_stats_text.color = c("muted")
+        story_draft_status.color = c("muted")
         endpoint_status.color = c("muted")
         endpoint_health_status.color = c("muted")
         endpoint_selected_hint.color = c("text")
@@ -1073,27 +1551,39 @@ def main(page: ft.Page) -> None:
 
         render_builder_messages()
         render_role_messages()
+        render_story_messages()
         render_action_history()
+        render_story_action_history()
+        render_story_memory_panels()
+        render_story_lorebooks()
         render_character_list()
         page.update()
 
     # ---- logic ----
     def set_builder_view() -> None:
+        state["active_mode"] = "roleplay"
         state["selected_character"] = None
         state["selected_session_id"] = None
+        state["editing_character_id"] = None
         state["role_actions"] = []
         state["builder_notes"] =[]
         state["builder_messages"] =[("assistant", "你好，我是向导。我会通过对话帮你创建角色。\n先告诉我：你想创建怎样的一个人物？")]
 
         draft_card.visible = False
         reset_draft_fields()
+        save_role_btn.content = ft.Text("保存并开始对话")
 
         header_title.value = "角色创建向导"
         header_subtitle.value = "用自然语言描述角色，系统自动生成完整体系草案"
+        sidebar_title.value = "AI Roleplay"
         export_btn.visible = False
+        edit_btn.visible = False
+        delete_btn.visible = False
         back_to_builder_btn.visible = False
         builder_view.visible = True
         role_view.visible = False
+        story_builder_view.visible = False
+        story_view.visible = False
 
         render_builder_messages()
         render_action_history()
@@ -1101,15 +1591,21 @@ def main(page: ft.Page) -> None:
         page.update()
 
     def set_role_view(character: dict[str, Any]) -> None:
+        state["active_mode"] = "roleplay"
         state["selected_character"] = character
         state["role_actions"] =[]
 
         header_title.value = character.get("name") or "角色详情"
         header_subtitle.value = "进入角色后可聊天、导出，并在消息中执行 AIGC"
+        sidebar_title.value = "AI Roleplay"
         export_btn.visible = True
+        edit_btn.visible = True
+        delete_btn.visible = True
         back_to_builder_btn.visible = True
         builder_view.visible = False
         role_view.visible = True
+        story_builder_view.visible = False
+        story_view.visible = False
 
         detail_name.value = character.get("name") or "未命名角色"
         detail_desc.value = character.get("description") or "无角色简介"
@@ -1118,6 +1614,71 @@ def main(page: ft.Page) -> None:
         render_character_list()
         render_role_messages()
         render_action_history()
+        page.update()
+
+    def reset_story_fields() -> None:
+        story_title.value = ""
+        story_premise.value = ""
+        story_opening.value = ""
+        story_system.value = ""
+        state["editing_story_id"] = None
+
+    def set_story_builder_view(project: dict[str, Any] | None = None) -> None:
+        state["active_mode"] = "story"
+        sidebar_title.value = "Interactive Fiction"
+        header_title.value = "互动小说创建台"
+        header_subtitle.value = "创建或编辑故事项目，打开后进行长期上下文续写"
+        mode_badge.value = "故事模式：LOCAL"
+        export_btn.visible = False
+        edit_btn.visible = isinstance(project, dict)
+        delete_btn.visible = isinstance(project, dict)
+        back_to_builder_btn.visible = False
+        builder_view.visible = False
+        role_view.visible = False
+        story_builder_view.visible = True
+        story_view.visible = False
+
+        if isinstance(project, dict):
+            state["selected_story"] = project
+            state["editing_story_id"] = project.get("project_id")
+            story_title.value = str(project.get("title") or "")
+            story_premise.value = str(project.get("premise") or "")
+            story_opening.value = str(project.get("opening_scene") or "")
+            story_system.value = str(project.get("system_prompt") or "")
+            save_story_btn.content = ft.Text("保存故事修改")
+            story_draft_apply_current_btn.disabled = False
+        else:
+            state["selected_story"] = None
+            state["story_session_id"] = None
+            state["story_session"] = None
+            reset_story_fields()
+            clear_story_lorebook_form()
+            save_story_btn.content = ft.Text("保存故事项目")
+            story_draft_apply_current_btn.disabled = True
+
+        render_character_list()
+        page.update()
+
+    def set_story_view(project: dict[str, Any]) -> None:
+        state["active_mode"] = "story"
+        state["selected_story"] = project
+        state["editing_story_id"] = None
+        sidebar_title.value = "Interactive Fiction"
+        header_title.value = project.get("title") or "互动小说"
+        header_subtitle.value = "续写故事、管理项目世界书，并对助手叙事段落触发 AIGC"
+        mode_badge.value = "故事模式：WORKSPACE"
+        export_btn.visible = False
+        edit_btn.visible = True
+        delete_btn.visible = True
+        back_to_builder_btn.visible = True
+        builder_view.visible = False
+        role_view.visible = False
+        story_builder_view.visible = False
+        story_view.visible = True
+
+        story_detail_title.value = project.get("title") or "未命名故事"
+        story_detail_premise.value = project.get("premise") or "无故事设定"
+        render_character_list()
         page.update()
 
     def clear_builder_pending_message() -> None:
@@ -1200,11 +1761,32 @@ def main(page: ft.Page) -> None:
         render_character_list()
         page.update()
 
+    async def reload_stories(select_latest: bool = False) -> None:
+        items = await api_get("/story/projects")
+        state["stories"] = items if isinstance(items, list) else []
+
+        if select_latest and state["stories"]:
+            await select_story(state["stories"][-1])
+            return
+
+        selected = state.get("selected_story")
+        selected_id = selected.get("project_id") if isinstance(selected, dict) else None
+        if selected_id:
+            matched = next((x for x in state["stories"] if isinstance(x, dict) and x.get("project_id") == selected_id), None)
+            if matched:
+                state["selected_story"] = matched
+                render_character_list()
+                return
+
+        render_character_list()
+        page.update()
+
     async def initialize() -> None:
         set_endpoint_form(None)
         try:
             await load_settings()
             await reload_characters(select_latest=False)
+            await reload_stories(select_latest=False)
         except ApiError as exc:
             show_toast(f"初始化失败：{exc}", error=True)
         set_builder_view()
@@ -1219,13 +1801,7 @@ def main(page: ft.Page) -> None:
                 lines.append(f"{idx}. [{keyword}] {insert_text}")
         return "\n".join(lines) if lines else "（暂无世界书条目）"
 
-    async def _generate_full_bundle(prompt: str) -> tuple[dict[str, Any], str]:
-        job_payload = {
-            "user_input": prompt,
-            "include_illustration_prompt": True,
-            "include_audio_plan": True,
-            "run_async": True,
-        }
+    async def _run_generation_job(job_payload: dict[str, Any]) -> tuple[dict[str, Any], str]:
         job = await api_post("/generation/jobs", job_payload)
         job_id = str(job.get("job_id") or "").strip()
         if not job_id: raise ApiError("生成任务未返回 job_id")
@@ -1246,6 +1822,15 @@ def main(page: ft.Page) -> None:
 
         artifacts = await api_get(f"/generation/jobs/{job_id}/artifacts")
         artifact_map = {str(item.get("artifact_type") or ""): item.get("payload", {}) for item in artifacts if isinstance(item, dict)}
+        return artifact_map, job_id
+
+    async def _generate_full_bundle(prompt: str) -> tuple[dict[str, Any], str]:
+        artifact_map, job_id = await _run_generation_job({
+            "user_input": prompt,
+            "include_illustration_prompt": True,
+            "include_audio_plan": True,
+            "run_async": True,
+        })
         
         bundle = artifact_map.get("bundle")
         if not isinstance(bundle, dict):
@@ -1256,6 +1841,107 @@ def main(page: ft.Page) -> None:
                 "audio_plan": artifact_map.get("audio_plan", {}),
             }
         return bundle, job_id
+
+    def format_story_lorebook_lines(entries: list[dict[str, Any]]) -> str:
+        lines: list[str] = []
+        for idx, item in enumerate(entries[:12]):
+            if not isinstance(item, dict):
+                continue
+            keyword = str(item.get("keyword") or "").strip()
+            insert_text = str(item.get("insert_text") or "").strip()
+            if not keyword or not insert_text:
+                continue
+            sort_order = item.get("sort_order", 100 + idx * 10)
+            lines.append(f"{keyword} | {sort_order} | {insert_text}")
+        return "\n".join(lines)
+
+    def parse_story_lorebook_lines(raw: str) -> list[dict[str, Any]]:
+        entries: list[dict[str, Any]] = []
+        for idx, line in enumerate(raw.splitlines()):
+            text = line.strip()
+            if not text:
+                continue
+            parts = [part.strip() for part in text.split("|", 2)]
+            if len(parts) == 3:
+                keyword, order_raw, insert_text = parts
+            elif len(parts) == 2:
+                keyword, insert_text = parts
+                order_raw = str(100 + idx * 10)
+            else:
+                keyword = text[:40]
+                insert_text = text
+                order_raw = str(100 + idx * 10)
+            if not keyword or not insert_text:
+                continue
+            try:
+                sort_order = int(order_raw)
+            except ValueError:
+                sort_order = 100 + idx * 10
+            entries.append({
+                "keyword": keyword[:120],
+                "insert_text": insert_text[:4000],
+                "sort_order": max(0, min(sort_order, 10000)),
+            })
+        return entries[:8]
+
+    def read_story_draft_payload() -> dict[str, Any]:
+        chapters = [line.strip() for line in (story_draft_chapters.value or "").splitlines() if line.strip()]
+        lorebook_entries = parse_story_lorebook_lines(story_draft_lorebook.value or "")
+        return {
+            "story_blueprint": {
+                "title": (story_draft_title.value or "").strip(),
+                "premise": (story_draft_premise.value or "").strip(),
+                "opening_scene": (story_draft_opening.value or "").strip(),
+                "system_prompt": (story_draft_system.value or "").strip(),
+                "chapters_outline": chapters[:8],
+                "tone": (story_draft_tone.value or "").strip() or "immersive dramatic fiction",
+                "protagonist_profile": (story_draft_protagonist.value or "").strip() or "A capable protagonist with room to grow under pressure.",
+            },
+            "story_lorebook": {"entries": lorebook_entries},
+            "illustration_prompt": {"prompt": (story_draft_illustration.value or "").strip()} if (story_draft_illustration.value or "").strip() else {},
+            "audio_plan": {"plan": (story_draft_audio.value or "").strip()} if (story_draft_audio.value or "").strip() else {},
+        }
+
+    def validate_story_draft_payload(payload: dict[str, Any]) -> str | None:
+        blueprint = payload.get("story_blueprint") if isinstance(payload.get("story_blueprint"), dict) else {}
+        lorebook = payload.get("story_lorebook") if isinstance(payload.get("story_lorebook"), dict) else {}
+        if not str(blueprint.get("title") or "").strip():
+            return "故事标题不能为空"
+        if not str(blueprint.get("premise") or "").strip():
+            return "故事前提不能为空"
+        if not str(blueprint.get("opening_scene") or "").strip():
+            return "开场场景不能为空"
+        chapters = blueprint.get("chapters_outline")
+        if not isinstance(chapters, list) or len([x for x in chapters if str(x).strip()]) < 3:
+            return "章节大纲至少需要 3 行"
+        entries = lorebook.get("entries")
+        if not isinstance(entries, list) or not entries:
+            return "至少需要 1 条有效故事世界书条目"
+        return None
+
+    def populate_story_draft(bundle: dict[str, Any]) -> None:
+        blueprint = bundle.get("story_blueprint") if isinstance(bundle.get("story_blueprint"), dict) else {}
+        lorebook = bundle.get("story_lorebook") if isinstance(bundle.get("story_lorebook"), dict) else {}
+        continuity = bundle.get("story_continuity_review") if isinstance(bundle.get("story_continuity_review"), dict) else {}
+        illustration = bundle.get("illustration_prompt") if isinstance(bundle.get("illustration_prompt"), dict) else {}
+        audio = bundle.get("audio_plan") if isinstance(bundle.get("audio_plan"), dict) else {}
+
+        story_draft_title.value = str(blueprint.get("title") or "")
+        story_draft_premise.value = str(blueprint.get("premise") or "")
+        story_draft_opening.value = str(blueprint.get("opening_scene") or "")
+        story_draft_system.value = str(blueprint.get("system_prompt") or "")
+        story_draft_tone.value = str(blueprint.get("tone") or "")
+        story_draft_protagonist.value = str(blueprint.get("protagonist_profile") or "")
+        chapters = blueprint.get("chapters_outline")
+        story_draft_chapters.value = "\n".join(str(item).strip() for item in chapters if str(item).strip()) if isinstance(chapters, list) else ""
+        entries = lorebook.get("entries")
+        story_draft_lorebook.value = format_story_lorebook_lines(entries if isinstance(entries, list) else [])
+        story_draft_illustration.value = str(illustration.get("prompt") or format_action_result(illustration) if illustration else "")
+        story_draft_audio.value = str(audio.get("plan") or format_action_result(audio) if audio else "")
+        story_draft_review.value = format_action_result(continuity if continuity else {})
+        state["story_draft_payload"] = read_story_draft_payload()
+        story_draft_card.visible = True
+        story_draft_status.value = "草案状态：已生成，可编辑后应用"
 
     # [规范 8.1 强制] 禁用与恢复输入框机制
     async def on_builder_send(e: ft.ControlEvent | None = None) -> None:
@@ -1350,6 +2036,15 @@ def main(page: ft.Page) -> None:
             "system_prompt": (draft_system.value or "").strip(),
         }
         try:
+            editing_id = state.get("editing_character_id")
+            if editing_id:
+                updated = await api_put(f"/characters/{editing_id}", payload)
+                show_toast("角色修改已保存")
+                state["editing_character_id"] = None
+                await reload_characters(select_latest=False)
+                await select_character(updated if isinstance(updated, dict) else payload)
+                return
+
             created = await api_post("/characters", payload)
             character_id = str(created.get("character_id") or "")
             created_lore = 0
@@ -1482,6 +2177,411 @@ def main(page: ft.Page) -> None:
         except Exception as exc:
             show_toast(f"导出失败：{exc}", error=True)
 
+    def on_edit_selected(e: ft.ControlEvent | None = None) -> None:
+        if state.get("active_mode") == "story":
+            selected_story = state.get("selected_story")
+            if isinstance(selected_story, dict):
+                set_story_builder_view(selected_story)
+            else:
+                show_toast("请先选择故事", error=True)
+            return
+
+        selected_character = state.get("selected_character")
+        if not isinstance(selected_character, dict):
+            show_toast("请先选择角色", error=True)
+            return
+
+        state["active_mode"] = "roleplay"
+        state["editing_character_id"] = selected_character.get("character_id")
+        state["builder_notes"] = []
+        state["builder_messages"] = [("assistant", "正在编辑已保存角色。修改草案字段后点击保存。")]
+        draft_name.value = str(selected_character.get("name") or "")
+        draft_desc.value = str(selected_character.get("description") or "")
+        draft_first.value = str(selected_character.get("first_message") or "")
+        draft_system.value = str(selected_character.get("system_prompt") or "")
+        draft_lorebook.value = "角色世界书编辑暂未并入本表单；本轮保留已有角色世界书数据。"
+        draft_illustration.value = ""
+        draft_audio.value = ""
+        draft_source.value = "草案来源：已保存角色"
+        draft_route_note.value = "提示：当前为编辑模式，保存会覆盖角色基础字段。"
+        save_role_btn.content = ft.Text("保存角色修改")
+        draft_card.visible = True
+
+        header_title.value = "编辑角色"
+        header_subtitle.value = "修改角色基础字段，保存后返回角色对话"
+        export_btn.visible = False
+        edit_btn.visible = False
+        delete_btn.visible = True
+        back_to_builder_btn.visible = True
+        builder_view.visible = True
+        role_view.visible = False
+        story_builder_view.visible = False
+        story_view.visible = False
+        render_builder_messages()
+        render_character_list()
+        page.update()
+        apply_theme()
+
+    async def on_delete_selected(e: ft.ControlEvent | None = None) -> None:
+        if state.get("active_mode") == "story":
+            selected_story = state.get("selected_story")
+            if not isinstance(selected_story, dict):
+                show_toast("请先选择故事", error=True)
+                return
+            project_id = str(selected_story.get("project_id") or "")
+            if not project_id:
+                show_toast("故事 ID 缺失", error=True)
+                return
+            try:
+                await api_delete(f"/story/projects/{project_id}")
+                state["selected_story"] = None
+                state["story_session_id"] = None
+                state["story_session"] = None
+                state["story_messages"] = []
+                state["story_facts"] = []
+                state["story_checkpoints"] = []
+                state["story_lorebooks"] = []
+                state["story_actions"] = []
+                await reload_stories(select_latest=False)
+                set_story_builder_view(None)
+                show_toast("故事已删除")
+            except ApiError as exc:
+                show_toast(f"删除故事失败：{exc}", error=True)
+            return
+
+        selected_character = state.get("selected_character")
+        if not isinstance(selected_character, dict):
+            show_toast("请先选择角色", error=True)
+            return
+        character_id = str(selected_character.get("character_id") or state.get("editing_character_id") or "")
+        if not character_id:
+            show_toast("角色 ID 缺失", error=True)
+            return
+        try:
+            await api_delete(f"/characters/{character_id}")
+            state["selected_character"] = None
+            state["selected_session_id"] = None
+            state["editing_character_id"] = None
+            state["role_messages"] = []
+            state["role_actions"] = []
+            await reload_characters(select_latest=False)
+            set_builder_view()
+            show_toast("角色已删除")
+        except ApiError as exc:
+            show_toast(f"删除角色失败：{exc}", error=True)
+
+    async def on_save_story(e: ft.ControlEvent | None = None) -> None:
+        title = (story_title.value or "").strip()
+        premise = (story_premise.value or "").strip()
+        if not title or not premise:
+            show_toast("请填写故事标题和核心设定", error=True)
+            return
+
+        payload = {
+            "title": title,
+            "premise": premise,
+            "opening_scene": (story_opening.value or "").strip(),
+            "system_prompt": (story_system.value or "").strip(),
+        }
+        try:
+            editing_id = state.get("editing_story_id")
+            if editing_id:
+                project = await api_put(f"/story/projects/{editing_id}", payload)
+                show_toast("故事修改已保存")
+            else:
+                project = await api_post("/story/projects", payload)
+                show_toast("故事项目已创建")
+            state["editing_story_id"] = None
+            await reload_stories(select_latest=False)
+            await select_story(project if isinstance(project, dict) else payload)
+        except ApiError as exc:
+            show_toast(f"保存故事失败：{exc}", error=True)
+
+    async def on_generate_story_draft(e: ft.ControlEvent | None = None) -> None:
+        prompt = (story_draft_prompt.value or "").strip()
+        if not prompt:
+            show_toast("请先输入故事草案需求", error=True)
+            return
+
+        story_draft_prompt.disabled = True
+        story_draft_generate_btn.disabled = True
+        story_draft_status.value = "草案状态：正在生成..."
+        page.update()
+
+        try:
+            artifact_map, job_id = await _run_generation_job({
+                "user_input": prompt,
+                "pipeline_type": "story_project",
+                "apply_mode": "draft_only",
+                "include_illustration_prompt": True,
+                "include_audio_plan": True,
+                "run_async": True,
+            })
+            bundle = artifact_map.get("story_bundle")
+            if not isinstance(bundle, dict):
+                bundle = {
+                    "story_blueprint": artifact_map.get("story_blueprint", {}),
+                    "story_lorebook": artifact_map.get("story_lorebook", {}),
+                    "story_continuity_review": artifact_map.get("story_continuity_review", {}),
+                    "illustration_prompt": artifact_map.get("illustration_prompt", {}),
+                    "audio_plan": artifact_map.get("audio_plan", {}),
+                }
+            populate_story_draft(bundle)
+            story_draft_status.value = f"草案状态：已生成（job {job_id[:8]}），可编辑后应用"
+            show_toast("故事草案已生成")
+        except (OperationTimeoutError, ApiError) as exc:
+            story_draft_status.value = f"草案状态：生成失败 - {exc}"
+            show_toast(f"故事草案生成失败：{exc}", error=True)
+        finally:
+            story_draft_prompt.disabled = False
+            story_draft_generate_btn.disabled = False
+            page.update()
+            apply_theme()
+
+    async def apply_story_draft(mode: str) -> None:
+        story_draft_payload = read_story_draft_payload()
+        validation_error = validate_story_draft_payload(story_draft_payload)
+        if validation_error:
+            show_toast(validation_error, error=True)
+            return
+
+        selected_story = state.get("selected_story")
+        target_project_id = None
+        if mode == "current":
+            if not isinstance(selected_story, dict) or not selected_story.get("project_id"):
+                show_toast("覆盖当前故事前，请先选择一个故事项目", error=True)
+                return
+            target_project_id = str(selected_story.get("project_id"))
+
+        story_draft_apply_new_btn.disabled = True
+        story_draft_apply_current_btn.disabled = True
+        story_draft_status.value = "草案状态：正在应用到故事项目..."
+        page.update()
+
+        try:
+            job_payload: dict[str, Any] = {
+                "user_input": (story_draft_prompt.value or story_draft_title.value or "apply story draft").strip(),
+                "pipeline_type": "story_project",
+                "apply_mode": "direct_apply",
+                "story_draft_payload": story_draft_payload,
+                "include_illustration_prompt": bool((story_draft_illustration.value or "").strip()),
+                "include_audio_plan": bool((story_draft_audio.value or "").strip()),
+                "run_async": True,
+            }
+            if target_project_id:
+                job_payload["story_project_id"] = target_project_id
+
+            artifact_map, job_id = await _run_generation_job(job_payload)
+            story_bundle = artifact_map.get("story_bundle")
+            apply_result = story_bundle.get("apply_result") if isinstance(story_bundle, dict) else None
+            project_id = str(apply_result.get("project_id") or "") if isinstance(apply_result, dict) else ""
+            if not project_id:
+                raise ApiError("应用完成但未返回 story project id")
+
+            await reload_stories(select_latest=False)
+            project = await api_get(f"/story/projects/{project_id}")
+            story_draft_status.value = f"草案状态：已应用（job {job_id[:8]}）"
+            show_toast("故事草案已应用")
+            await select_story(project if isinstance(project, dict) else {"project_id": project_id})
+        except (OperationTimeoutError, ApiError) as exc:
+            story_draft_status.value = f"草案状态：应用失败 - {exc}"
+            show_toast(f"故事草案应用失败：{exc}", error=True)
+        finally:
+            story_draft_apply_new_btn.disabled = False
+            story_draft_apply_current_btn.disabled = False
+            page.update()
+            apply_theme()
+
+    async def on_apply_story_draft_new(e: ft.ControlEvent | None = None) -> None:
+        await apply_story_draft("new")
+
+    async def on_apply_story_draft_current(e: ft.ControlEvent | None = None) -> None:
+        await apply_story_draft("current")
+
+    async def ensure_story_session(project_id: str) -> dict[str, Any]:
+        sessions = await api_get("/story/sessions", params={"project_id": project_id, "limit": 1, "offset": 0})
+        if isinstance(sessions, list) and sessions:
+            return sessions[0]
+        created = await api_post(f"/story/projects/{project_id}/sessions", {})
+        if not isinstance(created, dict):
+            raise ApiError("故事会话创建失败")
+        return created
+
+    async def reload_story_lorebooks(project_id: str) -> None:
+        items = await api_get(f"/story/projects/{project_id}/lorebooks")
+        state["story_lorebooks"] = items if isinstance(items, list) else []
+        render_story_lorebooks()
+
+    async def refresh_story_workspace() -> None:
+        session_id = str(state.get("story_session_id") or "")
+        selected_story = state.get("selected_story")
+        if not session_id or not isinstance(selected_story, dict):
+            return
+
+        try:
+            session = await api_get(f"/story/sessions/{session_id}")
+            history_payload = await api_get(f"/story/history/{session_id}")
+            facts = await api_get(f"/story/facts/{session_id}")
+            checkpoints = await api_get(f"/story/sessions/{session_id}/checkpoints")
+            actions = await api_get(f"/story/actions/{session_id}")
+            try:
+                stats = await api_get(f"/story/context/{session_id}/stats")
+            except ApiError:
+                stats = None
+
+            state["story_session"] = session if isinstance(session, dict) else None
+            history_items = history_payload.get("history") if isinstance(history_payload, dict) else []
+            messages: list[tuple[str, str]] = []
+            for item in history_items if isinstance(history_items, list) else []:
+                if not isinstance(item, dict):
+                    continue
+                raw_role = str(item.get("role") or "")
+                role = "user" if raw_role in {"user", "player"} else "assistant"
+                content = str(item.get("content") or "")
+                if content:
+                    messages.append((role, content))
+            state["story_messages"] = messages or [("assistant", str(selected_story.get("opening_scene") or "故事会话已启动。"))]
+            state["story_facts"] = facts if isinstance(facts, list) else []
+            state["story_checkpoints"] = checkpoints if isinstance(checkpoints, list) else []
+            state["story_actions"] = actions if isinstance(actions, list) else []
+            state["story_context_stats"] = stats if isinstance(stats, dict) else None
+            await reload_story_lorebooks(str(selected_story.get("project_id") or ""))
+
+            session_obj = state.get("story_session")
+            story_summary.value = str(session_obj.get("current_summary") or "暂无摘要") if isinstance(session_obj, dict) else "暂无摘要"
+            story_scene.value = str(session_obj.get("current_scene") or "暂无当前场景") if isinstance(session_obj, dict) else "暂无当前场景"
+            if isinstance(stats, dict):
+                story_context_stats_text.value = (
+                    f"上下文预算 {stats.get('context_char_budget')} 字符 · "
+                    f"事实 {stats.get('fact_count')} · "
+                    f"世界书命中 {stats.get('lorebook_hit_count')} · "
+                    f"近期条目 {stats.get('recent_entry_count')} · "
+                    f"检查点 {stats.get('checkpoint_count')}"
+                )
+            else:
+                story_context_stats_text.value = "上下文状态：未加载"
+
+            render_story_messages()
+            render_story_memory_panels()
+            render_story_action_history()
+            page.update()
+            apply_theme()
+        except ApiError as exc:
+            show_toast(f"刷新故事工作区失败：{exc}", error=True)
+
+    async def select_story(project: dict[str, Any]) -> None:
+        set_story_view(project)
+        project_id = str(project.get("project_id") or "")
+        if not project_id:
+            show_toast("故事 ID 缺失", error=True)
+            return
+
+        state["story_messages"] = [("assistant", "正在打开故事会话...")]
+        render_story_messages()
+        page.update()
+
+        try:
+            session = await ensure_story_session(project_id)
+            state["story_session_id"] = session.get("session_id")
+            state["story_session"] = session
+            await refresh_story_workspace()
+        except ApiError as exc:
+            state["story_messages"] = [("assistant", f"故事会话启动失败：{exc}")]
+            render_story_messages()
+            page.update()
+
+    async def on_story_send(e: ft.ControlEvent | None = None) -> None:
+        text = (story_input.value or "").strip()
+        if not text:
+            return
+        session_id = state.get("story_session_id")
+        if not session_id:
+            show_toast("当前故事会话未初始化", error=True)
+            return
+
+        story_input.value = ""
+        story_input.disabled = True
+        story_send_btn.disabled = True
+        state["story_messages"].append(("user", text))
+        state["story_messages"].append(("assistant", "思考中..."))
+        render_story_messages()
+        page.update()
+
+        try:
+            await api_post("/story/message", {"session_id": session_id, "message": text})
+            await refresh_story_workspace()
+        except ApiError as exc:
+            if state["story_messages"] and state["story_messages"][-1] == ("assistant", "思考中..."):
+                state["story_messages"].pop()
+            state["story_messages"].append(("assistant", f"续写失败：{exc}"))
+            render_story_messages()
+            show_toast(f"续写失败：{exc}", error=True)
+        finally:
+            story_input.disabled = False
+            story_send_btn.disabled = False
+            story_input.focus()
+            page.update()
+
+    async def on_save_story_lorebook(e: ft.ControlEvent | None = None) -> None:
+        selected_story = state.get("selected_story")
+        if not isinstance(selected_story, dict):
+            show_toast("请先打开一个故事项目", error=True)
+            return
+        project_id = str(selected_story.get("project_id") or "")
+        keyword = (story_lore_keyword.value or "").strip()
+        insert_text = (story_lore_text.value or "").strip()
+        if not keyword or not insert_text:
+            show_toast("请填写世界书触发词和插入文本", error=True)
+            return
+        try:
+            sort_order = int((story_lore_order.value or "100").strip())
+        except ValueError:
+            sort_order = 100
+        payload = {
+            "keyword": keyword,
+            "insert_text": insert_text,
+            "sort_order": sort_order,
+            "enabled": bool(story_lore_enabled.value),
+        }
+        try:
+            editing_id = state.get("editing_story_lorebook_id")
+            if editing_id:
+                await api_put(f"/story/lorebooks/{editing_id}", payload)
+                show_toast("故事世界书已更新")
+            else:
+                await api_post(f"/story/projects/{project_id}/lorebooks", payload)
+                show_toast("故事世界书已新增")
+            clear_story_lorebook_form()
+            await reload_story_lorebooks(project_id)
+            page.update()
+        except ApiError as exc:
+            show_toast(f"保存故事世界书失败：{exc}", error=True)
+
+    async def on_delete_story_lorebook(lorebook_id: str) -> None:
+        selected_story = state.get("selected_story")
+        if not lorebook_id or not isinstance(selected_story, dict):
+            show_toast("世界书条目或故事项目缺失", error=True)
+            return
+        try:
+            await api_delete(f"/story/lorebooks/{lorebook_id}")
+            await reload_story_lorebooks(str(selected_story.get("project_id") or ""))
+            show_toast("故事世界书已删除")
+            page.update()
+        except ApiError as exc:
+            show_toast(f"删除故事世界书失败：{exc}", error=True)
+
+    async def on_rollback_story_checkpoint(checkpoint_id: str) -> None:
+        session_id = str(state.get("story_session_id") or "")
+        if not session_id or not checkpoint_id:
+            show_toast("会话或检查点缺失", error=True)
+            return
+        try:
+            await api_post(f"/story/sessions/{session_id}/rollback/{checkpoint_id}", {})
+            await refresh_story_workspace()
+            show_toast("已回滚到检查点")
+        except ApiError as exc:
+            show_toast(f"回滚失败：{exc}", error=True)
+
     async def on_open_settings(e: ft.ControlEvent | None = None) -> None:
         try:
             await load_settings()
@@ -1505,12 +2605,18 @@ def main(page: ft.Page) -> None:
         except ApiError as exc:
             show_toast(f"保存设置失败：{exc}", error=True)
 
-    async def open_action_dialog(text: str) -> None:
-        if not state.get("selected_session_id"):
+    async def open_action_dialog(text: str, scope: str = "roleplay", default_action: str = "image_prompt") -> None:
+        if scope == "story":
+            if not state.get("story_session_id"):
+                show_toast("当前故事会话未初始化", error=True)
+                return
+        elif not state.get("selected_session_id"):
             show_toast("当前角色会话未初始化", error=True)
             return
 
-        action_type.value = "image_prompt"
+        state["action_scope"] = scope
+        action_dialog.title = ft.Text("故事段落 AIGC 增强" if scope == "story" else "段落 AIGC 增强", weight=ft.FontWeight.W_700)
+        action_type.value = default_action if default_action in {"image_prompt", "image_generate", "audio_plan"} else "image_prompt"
         action_selected_text.value = (text or "").strip()
         action_result.value = ""
         action_dialog.open = True
@@ -1518,7 +2624,8 @@ def main(page: ft.Page) -> None:
         apply_theme()
 
     async def on_execute_action(e: ft.ControlEvent | None = None) -> None:
-        session_id = state.get("selected_session_id")
+        scope = str(state.get("action_scope") or "roleplay")
+        session_id = state.get("story_session_id") if scope == "story" else state.get("selected_session_id")
         selected = (action_selected_text.value or "").strip()
         if not selected:
             show_toast("请先填写段落内容", error=True)
@@ -1534,12 +2641,17 @@ def main(page: ft.Page) -> None:
         }
 
         try:
-            created = await api_post("/chat/actions", payload)
+            endpoint = "/story/actions" if scope == "story" else "/chat/actions"
+            created = await api_post(endpoint, payload)
             if isinstance(created, dict):
-                state.setdefault("role_actions",[]).append(created)
+                if scope == "story":
+                    state.setdefault("story_actions", []).append(created)
+                else:
+                    state.setdefault("role_actions",[]).append(created)
                 result_obj = created.get("result")
                 action_result.value = format_action_result(result_obj if isinstance(result_obj, dict) else {})
             render_action_history()
+            render_story_action_history()
             page.update()
             show_toast("AIGC 动作执行完成")
         except ApiError as exc:
@@ -1549,17 +2661,51 @@ def main(page: ft.Page) -> None:
         state["is_dark"] = bool(theme_switch.value)
         apply_theme()
 
+    def on_create_new(e: ft.ControlEvent | None = None) -> None:
+        if state.get("active_mode") == "story":
+            set_story_builder_view(None)
+        else:
+            set_builder_view()
+
+    def on_back_to_builder(e: ft.ControlEvent | None = None) -> None:
+        if state.get("active_mode") == "story":
+            set_story_builder_view(None)
+        else:
+            set_builder_view()
+
+    def switch_to_roleplay(e: ft.ControlEvent | None = None) -> None:
+        state["active_mode"] = "roleplay"
+        set_builder_view()
+        apply_theme()
+
+    def switch_to_story(e: ft.ControlEvent | None = None) -> None:
+        state["active_mode"] = "story"
+        set_story_builder_view(None)
+        apply_theme()
+
     # Event Bindings
-    create_new_btn.on_click = lambda e: set_builder_view()
+    roleplay_mode_btn.on_click = switch_to_roleplay
+    story_mode_btn.on_click = switch_to_story
+    create_new_btn.on_click = on_create_new
     builder_send_btn.on_click = lambda e: page.run_task(on_builder_send)
     builder_input.on_submit = lambda e: page.run_task(on_builder_send)
     save_role_btn.on_click = lambda e: page.run_task(on_save_role)
 
     role_send_btn.on_click = lambda e: page.run_task(on_role_send)
     role_input.on_submit = lambda e: page.run_task(on_role_send)
+    story_send_btn.on_click = lambda e: page.run_task(on_story_send)
+    story_input.on_submit = lambda e: page.run_task(on_story_send)
+    save_story_btn.on_click = lambda e: page.run_task(on_save_story)
+    story_draft_generate_btn.on_click = lambda e: page.run_task(on_generate_story_draft)
+    story_draft_apply_new_btn.on_click = lambda e: page.run_task(on_apply_story_draft_new)
+    story_draft_apply_current_btn.on_click = lambda e: page.run_task(on_apply_story_draft_current)
+    story_lore_save_btn.on_click = lambda e: page.run_task(on_save_story_lorebook)
+    story_lore_clear_btn.on_click = lambda e: (clear_story_lorebook_form(), page.update())
 
     export_btn.on_click = lambda e: page.run_task(on_export_role)
-    back_to_builder_btn.on_click = lambda e: set_builder_view()
+    edit_btn.on_click = on_edit_selected
+    delete_btn.on_click = lambda e: page.run_task(on_delete_selected)
+    back_to_builder_btn.on_click = on_back_to_builder
 
     theme_switch.on_change = on_theme_change
     settings_btn.on_click = lambda e: page.run_task(on_open_settings)
